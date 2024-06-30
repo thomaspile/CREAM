@@ -1,0 +1,2 @@
+# CREAM
+Algorithmic Cryptocurrency Trader
