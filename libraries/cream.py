@@ -182,7 +182,7 @@ class AppliedStrategy:
         ax.set_title('Test Set- Buy Strategy')
         
         
-def turning_points(array):
+def get_turning_points(array):
     ''' turning_points(array) -> min_indices, max_indices
     Finds the turning points within an 1D array and returns the indices of the minimum and 
     maximum turning points in two separate lists.
@@ -217,30 +217,30 @@ def turning_points(array):
     return idx_min, idx_max
 
 
-# Define signal
+# # Define signal
 
-t = df_2022.index.values
-s = df_2022.a_index.values
+# t = df_2022.index.values
+# s = df_2022.a_index.values
 
-# Execute EMD on signal
-IMF = EMD().emd(s,t)
-N = IMF.shape[0]+1
+# # Execute EMD on signal
+# IMF = EMD().emd(s,t)
+# N = IMF.shape[0]+1
 
-# Plot results
-plt.subplot(N,1,1)
-plt.plot(t, s, 'r')
-plt.title("EMF for Cotton Prices")
-plt.xlabel("Time [Days]")
+# # Plot results
+# plt.subplot(N,1,1)
+# plt.plot(t, s, 'r')
+# plt.title("EMF for Cotton Prices")
+# plt.xlabel("Time [Days]")
 
-for n, imf in enumerate(IMF):
-    plt.subplot(N,1,n+2)
-    plt.plot(t, imf, 'g')
-    plt.title("IMF "+str(n+1))
-    plt.xlabel("Time [Days]")
+# for n, imf in enumerate(IMF):
+#     plt.subplot(N,1,n+2)
+#     plt.plot(t, imf, 'g')
+#     plt.title("IMF "+str(n+1))
+#     plt.xlabel("Time [Days]")
 
-plt.tight_layout()
-plt.savefig('simple_example')
-plt.show()
+# plt.tight_layout()
+# plt.savefig('simple_example')
+# plt.show()
 
         
 # def apply_parameters():
