@@ -3,8 +3,10 @@ import numpy as np
 import copy
 import json
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import Ridge, Lasso, ElasticNet, LinearRegression
+from sklearn.linear_model import Ridge, Lasso, ElasticNet, LinearRegression, LogisticRegression
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 # from sklearn.utils.testing import ignore_warnings
 # from sklearn.exceptions import ConvergenceWarning
 from xgboost.sklearn import XGBClassifier, XGBRegressor
@@ -128,6 +130,10 @@ class ModelBuilder:
         if params is None:
             params = {}
         params = params.copy()
+        
+        if 'cutoff' in params.keys():
+            cutoff = params['cutoff']
+            del params['cutoff']
 
         # Make sure parameters that need to be integers are integers
         for parameter_name in ['max_depth', 'min_child_samples', 'num_leaves', 'subsample_for_bin']:
@@ -221,7 +227,7 @@ class ModelBuilder:
             y_valid = None 
         
         if outcome_type == 'classification':
-            errors = self.evaluate_classifier(model, X_train, y_train, X_test, y_test, X_valid, y_valid, ret=True)
+            errors = self.evaluate_classifier(model, X_train, y_train, X_test, y_test, X_valid, y_valid, cutoff=cutoff, ret=True)
         else:
             errors = self.evaluate_regressor(model, X_train, y_train, X_test, y_test, X_valid, y_valid, ret=True)
 
@@ -285,38 +291,76 @@ class ModelBuilder:
         importance = self.feature_importances_linear(model, X_train.columns)
         
         return model, importance, errors
-       
-    def evaluate_classifier(self, model, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, ret=False):
+    
+    def build_logistic(self, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, params=None):
+        
+        if 'cutoff' in params.keys():
+            cutoff = params['cutoff']
+            del params['cutoff']
+        else:
+            cutoff = None
+            
+        
+        model = LogisticRegression()
+        if params is not None:
+            model.set_params(**params)
+            
+        model.fit(X_train, y_train)
+        
+        if X_valid is not None:
+            if X_valid.shape[0]==0:
+                X_valid = None
+                y_valid = None 
 
-        try: 
-            y_pred_train = model.predict_proba(X_train)[:, 1]
-            train_auc = roc_auc_score(y_train, y_pred_train)
-            precision, recall, _ = metrics.precision_recall_curve(y_train, y_pred_train)
-            train_auc_pr = metrics.auc(recall, precision)
+        errors = self.evaluate_classifier(model, X_train, y_train, X_test, y_test, X_valid, y_valid, cutoff=cutoff, ret=True)
+        
+        importance = self.feature_importances_linear(model, X_train.columns)
+        
+        return model, importance, errors
+    
+    def get_classification_metrics(self, y_hat, y_pred, dset, cutoff=None):
+        
+        auc = roc_auc_score(y_hat, y_pred)
+        precision, recall, _ = metrics.precision_recall_curve(y_hat, y_pred)
+        auc_pr = metrics.auc(recall, precision)
 
-            print('Train AUC: ' + str(train_auc))
-            print('Train AUC_PR: ' + str(train_auc_pr))
-        except Exception as e:
-            train_auc = None
-            print('Unable to predict on train set')
-            print(f'Error returned: {e}')
-        classification_metrics = {'train_auc': train_auc, 'train_auc_pr':train_auc_pr}
+        print(f'{dset} AUC: ' + str(auc))
+        print(f'{dset} AUC_PR: ' + str(auc_pr))
+
+        if cutoff is not None:
+            df_preds = pd.DataFrame({'actuals':y_hat, 'pred':y_pred})
+            df_preds['classified'] = np.where(df_preds['pred'] >= cutoff, 1, 0)
+
+            precision = df_preds[df_preds['classified'] == 1].actuals.mean()
+            accuracy = df_preds[df_preds['actuals'] == 1].classified.mean()
+
+            print(f'{dset} Accuracy: ' + str(accuracy))
+            print(f'{dset} Precision: ' + str(precision))
+        else:
+            accuracy, precision = None, None
+
+        return {'auc':auc, 'auc_pr':auc_pr, 'accuracy':accuracy, 'precision':precision}
+    
+    def evaluate_classifier(self, model, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, cutoff=None, ret=False):
+        
+        classification_metrics = {}
+        
+        y_pred_train = model.predict_proba(X_train)[:, 1]
+        train_metrics = self.get_classification_metrics(y_train, y_pred_train, dset='Train', cutoff=cutoff)
+        train_metrics = {'train_' + key:val for key, val in zip(train_metrics.keys(), train_metrics.values())}
+        classification_metrics.update(train_metrics)
 
         if X_test is not None:
             try: 
                 y_pred_test = model.predict_proba(X_test)[:, 1]
-                test_auc = roc_auc_score(y_test, y_pred_test)
-                precision, recall, _ = metrics.precision_recall_curve(y_test, y_pred_test)
-                test_auc_pr = metrics.auc(recall, precision)
-                
-                print('Test AUC: ' + str(test_auc))
-                print('Test AUC_PR: ' + str(test_auc_pr))
+                test_metrics = self.get_classification_metrics(y_test, y_pred_test, dset='Test', cutoff=cutoff)
+                test_metrics = {'test_' + key:val for key, val in zip(train_metrics.keys(), train_metrics.values())}
+                classification_metrics.update(test_metrics)                
             except Exception as e:
                 test_auc = None
                 test_auc_pr = None
                 print('Unable to predict on test set')
                 print(f'Error returned: {e}')
-            classification_metrics.update({'test_auc': test_auc, 'test_auc_pr':test_auc_pr})
         else:
             classification_metrics.update({'test_auc': None})
 
@@ -486,10 +530,16 @@ class ModelBuilder:
         return X_train, X_test, X_valid, y_train, y_test, y_valid
       
     def feature_importances_linear(self, model, features, sort=True):
-
+        
+        if len(model.coef_) == 1 and isinstance(model.coef_[0], np.ndarray):
+            coefs = np.array(list(model.coef_[0]))
+        else:
+            coefs = model.coef_
+        
         importance = pd.DataFrame({'feature':features, 
-                                  'coef':model.coef_, 
-                                  'prop':abs(model.coef_)/abs(model.coef_).sum()})
+                                  'coef':coefs, 
+                                  'prop':abs(coefs)/abs(coefs).sum()})
+        
         if sort:
             importance = importance.sort_values('prop', ascending=False).reset_index(drop=True)
 
@@ -1025,6 +1075,13 @@ space_elasticnet = {
   'l1_ratio': hp.uniform('l1_ratio', 0, 1)
 }
 
+space_logistic_regularised = {
+  'penalty':hp.choice('penalty', ['l1']),
+  'solver':hp.choice('solver', ['saga', 'liblinear']),
+  'C': hp.uniform('C', 0, 1)
+}
+
+
 class OptimalModel:
 
     def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, stratify_kfold=False):
@@ -1079,8 +1136,8 @@ class OptimalModel:
         
         t0 = time()
         
-        if self.model_type not in ['lgb', 'xgboost', 'rf', 'dnn', 'lasso', 'ridge', 'elasticnet']:
-            raise ValueError('model_type must be one of "lgb", "rf", "xgboost", "dnn", "lasso", "ridge" or "elasticnet"')
+        if self.model_type not in ['lgb', 'xgboost', 'rf', 'dnn', 'lasso', 'ridge', 'elasticnet', 'logistic']:
+            raise ValueError('model_type must be one of "lgb", "rf", "xgboost", "dnn", "lasso", "ridge", "elasticnet", or "logistic"')
         if self.model_type not in ['lgb', 'xgboost'] and self.how_to_tune == 'early_stopping':
             raise ValueError('model_type must be one of "lgb", "xgboost" if how_to_tune == "early_stopping"')
         if self.opt_lib not in ['opt', 'hp', 'ga']:
@@ -1111,7 +1168,10 @@ class OptimalModel:
             elif self.model_type == 'elasticnet': 
                 space = space_elasticnet.copy()
                 objective_fn = self.objective_elasticnet_hp            
-            
+            elif self.model_type == 'logistic': 
+                space = space_logistic_regularised.copy()
+                objective_fn = self.objective_logistic_regularised_hp     
+                
             if self.search_space is not None:
                 space = self.search_space.copy()
             
@@ -1216,8 +1276,8 @@ class OptimalModel:
         
         if 'outcome_var' in model_params.keys():
             del model_params['outcome_var']
-        if 'cutoff' in model_params.keys():
-            del model_params['cutoff']
+        # if 'cutoff' in model_params.keys():
+        #     del model_params['cutoff']
                 
         builder = ModelBuilder()
         
@@ -1255,6 +1315,10 @@ class OptimalModel:
                 model, importance, errors = builder.build_elasticnet(self.X_train[self.cols], self.y_train, 
                                                                      self.X_test[self.cols], self.y_test, 
                                                                      self.X_valid[self.cols], self.y_valid, model_params)
+            elif self.model_type == 'logistic':
+                model, importance, errors = builder.build_logistic(self.X_train[self.cols], self.y_train, 
+                                                                     self.X_test[self.cols], self.y_test, 
+                                                                     self.X_valid[self.cols], self.y_valid, model_params)                
         except Exception as e:
             print(f'Failed to build best model after hp optimisation. Error: {e}')
             print(f'The best params were:')
@@ -1337,9 +1401,21 @@ class OptimalModel:
                 else:
                     cv = KFold(n_splits=k, shuffle=False)
             else:
-                cv = KFold(n_splits=k) 
+                cv = KFold(n_splits=k, shuffle=False) 
             scores = cross_val_score(model, X_train, y_train, cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
             loss = cross_val_loss_func(scores)
+            
+        elif how_to_tune == 'cross_val_standardised':
+            
+            pipeline = Pipeline([
+                ('scaler', StandardScaler()),
+                ('model', model)
+            ])
+
+            kfold = KFold(n_splits=k, shuffle=False)
+            scores = cross_val_score(pipeline, X_train, y_train, cv=kfold, n_jobs=self.n_jobs, scoring=cv_scoring)
+            loss = cross_val_loss_func(scores)
+            
         elif how_to_tune == 'cross_val_total':
             self.debug_out('hp tuning with cross validation', self.debug)
             X = pd.concat([X_train, X_test])
@@ -1352,7 +1428,8 @@ class OptimalModel:
             else:
                 cv = KFold(n_splits=k) 
             scores = cross_val_score(model, X, y, cv=cv, n_jobs=1, scoring=cv_scoring)
-            loss = cross_val_loss_func(scores)          
+            loss = cross_val_loss_func(scores)   
+            
         elif how_to_tune == 'train+test': 
             self.debug_out('hp tuning on train and test sets', self.debug)
             model.fit(X_train, y_train)
@@ -1364,6 +1441,7 @@ class OptimalModel:
             loss_train = eval_func(y_train, y_pred_train)
             loss_test = eval_func(y_test, y_pred_test)
             loss = (loss_train + loss_test) / 2
+            
         elif how_to_tune == 'early_stopping':
             self.debug_out('hp tuning with early stopping on test set', self.debug)
             early_stopping = lgb.early_stopping(stopping_rounds=25, verbose=True)
@@ -1387,26 +1465,7 @@ class OptimalModel:
             
         return loss, scores  
     
-    def objective_lgb_hp(self, params):
-
-        """Objective function for Gradient Boosting Machine Hyperparameter Tuning"""
-        
-        random.seed(self.seed)
-        
-        # Make sure parameters that need to be integers are integers
-        for parameter_name in ['num_leaves', 'subsample_for_bin', 'min_child_samples']:
-            try:
-                params[parameter_name] = int(params[parameter_name])
-            except:
-                pass
-        
-        if self.debug:
-            print(params)
-        
-        if self.outcome_type == 'classification':
-            model = LGBMClassifier(n_jobs=self.n_jobs, verbosity=-100)
-        else:
-            model = LGBMRegressor(n_jobs=self.n_jobs, verbosity=-100)
+    def handle_parameters(self, params):
         
         if 'cutoff' in params.keys() and callable(self.eval_metric):
             evaluation = partial(self.eval_metric, cutoff=params['cutoff'])
@@ -1429,6 +1488,31 @@ class OptimalModel:
             del model_params['outcome_var']
         if 'cutoff' in model_params.keys():
             del model_params['cutoff']
+            
+        return X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params
+            
+    def objective_lgb_hp(self, params):
+
+        """Objective function for Gradient Boosting Machine Hyperparameter Tuning"""
+        
+        random.seed(self.seed)
+        
+        # Make sure parameters that need to be integers are integers
+        for parameter_name in ['num_leaves', 'subsample_for_bin', 'min_child_samples']:
+            try:
+                params[parameter_name] = int(params[parameter_name])
+            except:
+                pass
+        
+        if self.debug:
+            print(params)
+        
+        if self.outcome_type == 'classification':
+            model = LGBMClassifier(n_jobs=self.n_jobs, verbosity=-100)
+        else:
+            model = LGBMRegressor(n_jobs=self.n_jobs, verbosity=-100)
+        
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
@@ -1505,7 +1589,7 @@ class OptimalModel:
         model = Lasso()
         model.set_params(**params)
         
-        self.debug_out('hp lasso train and evaluate', self.debug)
+        self.debug_out('hp lasso regression train and evaluate', self.debug)
         loss, cv_scores = self.train_and_evaluate(model, 
                                                   self.df_train[self.cols], 
                                                   self.df_train[self.outcome_var], 
@@ -1530,7 +1614,7 @@ class OptimalModel:
         model = Ridge()
         model.set_params(**params)
         
-        self.debug_out('hp lasso train and evaluate', self.debug)
+        self.debug_out('hp ridge regression train and evaluate', self.debug)
         loss, cv_scores = self.train_and_evaluate(model, 
                                                   self.X_train[self.cols], 
                                                   self.y_train, 
@@ -1543,7 +1627,7 @@ class OptimalModel:
                                                   self.stratify_kfold)
             
         return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
-
+    
     def objective_elasticnet_hp(self, params_in):
 
         """Objective function for ElasticNet Regression Hyperparameter Tuning"""
@@ -1555,7 +1639,7 @@ class OptimalModel:
         model = ElasticNet()
         model.set_params(**params)
         
-        self.debug_out('hp lasso train and evaluate', self.debug)
+        self.debug_out('hp elasticnet regression train and evaluate', self.debug)
         loss, cv_scores = self.train_and_evaluate(model, 
                                                   self.X_train[self.cols], 
                                                   self.y_train, 
@@ -1567,8 +1651,35 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
             
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}            
-      
+        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}    
+    
+    def objective_logistic_regularised_hp(self, params_in):
+        
+        """Objective function for Logistic Regression Hyperparameter Tuning"""
+        
+        random.seed(self.seed)
+        
+        params = params_in.copy()
+        
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        
+        model = LogisticRegression()
+        model.set_params(**model_params)
+        
+        self.debug_out('hp logistic regression train and evaluate', self.debug)
+        loss, cv_scores = self.train_and_evaluate(model, 
+                                                  X_train, 
+                                                  y_train, 
+                                                  X_test, 
+                                                  y_test, 
+                                                  self.how_to_tune, 
+                                                  self.outcome_type,
+                                                  evaluation,
+                                                  self.k,
+                                                  self.stratify_kfold)
+            
+        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}      
+
     def objective_xgboost_hp(self, params_in):
 
         """Objective function for Gradient Boosting Machine Hyperparameter Tuning"""
