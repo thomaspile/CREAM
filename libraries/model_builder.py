@@ -26,6 +26,12 @@ import warnings
 import math
 from functools import partial
 
+# from sklearn.utils.testing import ignore_warnings
+from warnings import simplefilter
+from sklearn.exceptions import ConvergenceWarning
+simplefilter(action="ignore", category=ConvergenceWarning)
+
+
 # from utilities import GenUtilities, GenPlots, PlotUtilities, StandardDictionaries
 
 warnings.filterwarnings("ignore", message="Found `num_iterations` in params. Will use it instead of argument")
@@ -1050,7 +1056,7 @@ space_rf = {
     'n_estimators': pyll.scope.int(hp.quniform('n_estimators', 50, 750, 100)),
     'max_depth': pyll.scope.int(hp.quniform('max_depth', 6, 20, 2)),
     'min_samples_split': pyll.scope.int(hp.quniform('min_samples_split', 2, 20, 1)),
-    'num_leaves': pyll.scope.int(hp.quniform('num_leaves', 2, 150, 1)),
+    'max_leaf_nodes': pyll.scope.int(hp.quniform('max_leaf_nodes', 2, 150, 1)),
     'max_features': hp.choice('boosting_type', ['sqrt'])
     # 'min_child_samples': pyll.scope.int(hp.choice('min_child_samples', [10, 100, 500, 1000, 5000])),
 #     'reg_alpha': hp.choice('reg_alpha', [0, 0.001, 0.01, 0.1, 0.2]),
@@ -1333,8 +1339,10 @@ class OptimalModel:
             print(f'Cross validation scores: {cv_scores}')
         
         return model, params, trials, importance, errors, cv_scores
-
+    
     def train_and_evaluate(self, model, X_train, y_train, X_test, y_test, how_to_tune, outcome_type, eval_metric='rmse', k=5, stratify_kfold=False):
+        
+        simplefilter(action="ignore", category=ConvergenceWarning)
         
         if outcome_type == 'classification':
             def pred_func(X, model):
@@ -1587,17 +1595,20 @@ class OptimalModel:
         params = params_in.copy()
         
         model = Lasso()
-        model.set_params(**params)
         
-        self.debug_out('hp lasso regression train and evaluate', self.debug)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+            
+        model.set_params(**model_params)
+
+        self.debug_out('hp lasso train and evaluate', self.debug)
         loss, cv_scores = self.train_and_evaluate(model, 
-                                                  self.df_train[self.cols], 
-                                                  self.df_train[self.outcome_var], 
-                                                  self.df_test[self.cols], 
-                                                  self.df_test[self.outcome_var], 
+                                                  X_train, 
+                                                  y_train, 
+                                                  X_test, 
+                                                  y_test, 
                                                   self.how_to_tune, 
                                                   self.outcome_type,
-                                                  self.eval_metric,
+                                                  evaluation,
                                                   self.k,
                                                   self.stratify_kfold)
             
@@ -1612,17 +1623,20 @@ class OptimalModel:
         params = params_in.copy()
         
         model = Ridge()
-        model.set_params(**params)
         
-        self.debug_out('hp ridge regression train and evaluate', self.debug)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+            
+        model.set_params(**model_params)
+
+        self.debug_out('hp ridge train and evaluate', self.debug)
         loss, cv_scores = self.train_and_evaluate(model, 
-                                                  self.X_train[self.cols], 
-                                                  self.y_train, 
-                                                  self.X_test[self.cols], 
-                                                  self.y_test, 
+                                                  X_train, 
+                                                  y_train, 
+                                                  X_test, 
+                                                  y_test, 
                                                   self.how_to_tune, 
                                                   self.outcome_type,
-                                                  self.eval_metric,
+                                                  evaluation,
                                                   self.k,
                                                   self.stratify_kfold)
             
@@ -1637,17 +1651,20 @@ class OptimalModel:
         params = params_in.copy()
         
         model = ElasticNet()
-        model.set_params(**params)
         
-        self.debug_out('hp elasticnet regression train and evaluate', self.debug)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+            
+        model.set_params(**model_params)
+
+        self.debug_out('hp elasticnet train and evaluate', self.debug)
         loss, cv_scores = self.train_and_evaluate(model, 
-                                                  self.X_train[self.cols], 
-                                                  self.y_train, 
-                                                  self.X_test[self.cols], 
-                                                  self.y_test, 
+                                                  X_train, 
+                                                  y_train, 
+                                                  X_test, 
+                                                  y_test, 
                                                   self.how_to_tune, 
                                                   self.outcome_type,
-                                                  self.eval_metric,
+                                                  evaluation,
                                                   self.k,
                                                   self.stratify_kfold)
             
