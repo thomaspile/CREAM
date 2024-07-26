@@ -48,55 +48,68 @@ class RandomForestExplainer:
         
         data = []
         node_index = 0
+        
         while tree_.children_left[node_index] != -1:
-            left_child_index = tree_.children_left[node_index]
-            right_child_index = tree_.children_right[node_index]
+            try:
+                left_child_index = tree_.children_left[node_index]
+                right_child_index = tree_.children_right[node_index]
 
-            split_variable = tree_.feature[node_index]
-            split_threshold = tree_.threshold[node_index]
+                split_variable_index = tree_.feature[node_index]
+                split_threshold = tree_.threshold[node_index]
 
-            left_child_class_volumes = tree_.value[left_child_index][0]
-            right_child_class_volumes = tree_.value[right_child_index][0]
-
-            left_child_class_rate = left_child_class_volumes[1] / (left_child_class_volumes[0] + left_child_class_volumes[1])
-            right_child_class_rate = right_child_class_volumes[1] / (right_child_class_volumes[0] + right_child_class_volumes[1])
-
-            if left_child_class_rate > right_child_class_rate:
-                direction_split_vote = 'left'
-            else:
-                direction_split_vote = 'right'
-
-            individual_value = individual.iloc[split_variable]
-            if individual_value <= split_threshold:
-                direction_travelled = 'left'
-                node_index = left_child_index
-                if direction_split_vote == 'left':
-                    split_vote = 1
+                left_child_class_volumes = tree_.value[left_child_index][0]
+                right_child_class_volumes = tree_.value[right_child_index][0]
+              
+                left_child_class_rate = left_child_class_volumes[1] / sum(left_child_class_volumes)
+                right_child_class_rate = right_child_class_volumes[1] / sum(right_child_class_volumes)
+                
+                if left_child_class_rate > right_child_class_rate:
+                    direction_split_vote = 'left'
                 else:
-                    split_vote = -1
-            else:
-                direction_travelled = 'right'
-                node_index = right_child_index
-                if direction_split_vote == 'right':
-                    split_vote = 1
-                else:
-                    split_vote = -1
+                    direction_split_vote = 'right'
 
-            data.append({
-                'tree_number': tree_index,
-                'node_number': node_index,
-                'left_child_node': left_child_index,
-                'right_child_node': right_child_index,
-                'left_child_class_volumes': left_child_class_volumes,
-                'left_child_class_rate': left_child_class_rate,
-                'right_child_class_volumes': right_child_class_volumes,
-                'right_child_class_rate': right_child_class_rate,
-                'split_threshold': split_threshold,
-                'split_variable': feat_vars[split_variable],
-                'individuals_value': individual_value,
-                'direction_travelled': direction_travelled,
-                'split_vote': split_vote
-            })  
+                split_variable = self.features[split_variable_index]
+                individual_value = individual[split_variable]
+
+                if individual_value <= split_threshold:
+                    direction_travelled = 'left'
+                    node_index = left_child_index
+                    if direction_split_vote == 'left':
+                        split_vote = 1
+                    else:
+                        split_vote = -1
+                else:
+                    direction_travelled = 'right'
+                    node_index = right_child_index
+                    if direction_split_vote == 'right':
+                        split_vote = 1
+                    else:
+                        split_vote = -1
+
+                data.append({
+                    'tree_number': tree_index,
+                    'node_number': node_index,
+                    'left_child_node': left_child_index,
+                    'right_child_node': right_child_index,
+                    'left_child_class_volumes': left_child_class_volumes,
+                    'left_child_class_rate': left_child_class_rate,
+                    'right_child_class_volumes': right_child_class_volumes,
+                    'right_child_class_rate': right_child_class_rate,
+                    'split_threshold': split_threshold,
+                    'split_variable': split_variable,
+                    'individuals_value': individual_value,
+                    'direction_travelled': direction_travelled,
+                    'split_vote': split_vote
+                })  
+            
+            except Exception as e:
+                print('node_index', node_index)    
+                print('tree_.feature', tree_.feature)
+                print('split_variable', split_variable)
+                print('split_variable', split_variable)
+                print('split_threshold', split_threshold)
+                print('individual_value', individual_value)
+                raise e
         
         return pd.DataFrame(data)
                 
@@ -139,7 +152,7 @@ class RandomForestExplainer:
             orientation = orientation,
             measure = ["relative", "relative", "relative", "relative", "relative"],
             x = x,
-            textposition = "outside",
+            textposition = "inside",
             text = [str(np.round(val, 2)) for val in values],
             y = y,
             connector = {"line":{"color":"rgb(63, 63, 63)"}},
@@ -148,8 +161,8 @@ class RandomForestExplainer:
         fig.update_layout(
                 title = "Feature Contributions",
                 showlegend = True,
-                width = 1000,  # Set the width here
-                height = 600,  # Set the height here
+                width = 1000, 
+                height = 600,
         )
 
         fig.show()
