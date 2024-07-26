@@ -1,9 +1,190 @@
+import os
+import sys
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
+from plotly.subplots import make_subplots
+import plotly.graph_objs as go
+from plotly.offline import plot
+from functools import reduce
+import plotly.express as px
+from datetime import datetime, timedelta
+import matplotlib.ticker as mtick
+import seaborn as sns
+import multiprocessing as mp
+import copy
+import random
+import math
+from time import time
+from dateutil.relativedelta import relativedelta
+import pickle
+import kds
+import seaborn as sns
+import types
+from pandas.api.types import is_numeric_dtype
+from sklearn import metrics
+from sklearn.metrics import classification_report, roc_auc_score, average_precision_score
+from sklearn.inspection import PartialDependenceDisplay
+from sklearn.preprocessing import StandardScaler
+from collections import defaultdict
+
+from model_builder import OptimalModel, ModelBuilder, ModelPlots
+
+sys.path.insert(0, '/Users/thomaspile/Documents/GitHub/utilities')
+from utilities import GenUtilities, GenPlots
+
+plt.style.use('ggplot')
 
 
+class RandomForestExplainer:
+    
+    def __init__(self, model):
+        
+        self.model = model
+        self.features = list(model.__dict__['feature_names_in_'])
+        
+    def traverse_tree(self, tree_index, tree_, individual):
+        
+        data = []
+        node_index = 0
+        while tree_.children_left[node_index] != -1:
+            left_child_index = tree_.children_left[node_index]
+            right_child_index = tree_.children_right[node_index]
+
+            split_variable = tree_.feature[node_index]
+            split_threshold = tree_.threshold[node_index]
+
+            left_child_class_volumes = tree_.value[left_child_index][0]
+            right_child_class_volumes = tree_.value[right_child_index][0]
+
+            left_child_class_rate = left_child_class_volumes[1] / (left_child_class_volumes[0] + left_child_class_volumes[1])
+            right_child_class_rate = right_child_class_volumes[1] / (right_child_class_volumes[0] + right_child_class_volumes[1])
+
+            if left_child_class_rate > right_child_class_rate:
+                direction_split_vote = 'left'
+            else:
+                direction_split_vote = 'right'
+
+            individual_value = individual.iloc[split_variable]
+            if individual_value <= split_threshold:
+                direction_travelled = 'left'
+                node_index = left_child_index
+                if direction_split_vote == 'left':
+                    split_vote = 1
+                else:
+                    split_vote = -1
+            else:
+                direction_travelled = 'right'
+                node_index = right_child_index
+                if direction_split_vote == 'right':
+                    split_vote = 1
+                else:
+                    split_vote = -1
+
+            data.append({
+                'tree_number': tree_index,
+                'node_number': node_index,
+                'left_child_node': left_child_index,
+                'right_child_node': right_child_index,
+                'left_child_class_volumes': left_child_class_volumes,
+                'left_child_class_rate': left_child_class_rate,
+                'right_child_class_volumes': right_child_class_volumes,
+                'right_child_class_rate': right_child_class_rate,
+                'split_threshold': split_threshold,
+                'split_variable': feat_vars[split_variable],
+                'individuals_value': individual_value,
+                'direction_travelled': direction_travelled,
+                'split_vote': split_vote
+            })  
+        
+        return pd.DataFrame(data)
+                
+    def traverse_forest(self, individual):
+        
+        dfs = []
+        for tree_index, tree in enumerate(model.estimators_): 
+            tree_ = tree.tree_
+            df_tree = self.traverse_tree(tree_index, tree_, individual)
+            dfs.append(df_tree)
+        
+        self.df_trees = pd.concat(dfs)
+        
+        df_votes = self.df_trees.groupby('split_variable').split_vote.sum().sort_values()\
+                                .reset_index().rename(columns={'split_vote':'vote_count'})
+        df_votes['abs_vote_count'] = abs(df_votes['vote_count'])
+        df_votes['abs_vote_prop'] = df_votes['abs_vote_count'] / df_votes['abs_vote_count'].sum()
+        self.df_votes = df_votes.sort_values('abs_vote_prop', ascending=False).reset_index(drop=True)
+        
+        return self.df_trees, self.df_votes
+        
+    def plot_waterfall(self, individual, n_feats, orientation='v'):
+        
+        df_trees, df_votes = self.traverse_forest(individual)
+
+        variables = df_votes.iloc[0:n_feats]['split_variable'].values
+        vote_counts = df_votes.iloc[0:n_feats]['vote_count'].values
+        
+        values = individual[variables]
+        
+        if orientation == 'v':
+            x = variables
+            y = vote_counts
+        else:
+            x = vote_counts
+            y = variables
+            
+        fig = go.Figure(go.Waterfall(
+            name = "Contribution", 
+            orientation = orientation,
+            measure = ["relative", "relative", "relative", "relative", "relative"],
+            x = x,
+            textposition = "outside",
+            text = [str(np.round(val, 2)) for val in values],
+            y = y,
+            connector = {"line":{"color":"rgb(63, 63, 63)"}},
+        ))
+        
+        fig.update_layout(
+                title = "Feature Contributions",
+                showlegend = True,
+                width = 1000,  # Set the width here
+                height = 600,  # Set the height here
+        )
+
+        fig.show()
+
+        
 class ModelValidation: 
-  
+    
+    def __init__(self, model, features, target, id_var, df_train, df_test, df_feature_importance, 
+                 feature_dictionary=None, bounds_dictionary=None, class_idx=1):
+        
+        self.model = model
+        self.target = target
+        self.features = features
+        self.id_var = id_var
+        self.df_train = df_train
+        self.df_test = df_test
+        self.df_feature_importance = df_feature_importance
+        if feature_dictionary is None:
+            self.feature_dictionary = {}
+        else:
+            self.feature_dictionary = feature_dictionary
+        if bounds_dictionary is None:
+            self.bounds_dictionary = {}
+        else:
+            self.bounds_dictionary = bounds_dictionary
+        
+        self.class_idx = class_idx
+            
+        self.df_train['prob'] = self.model.predict_proba(self.df_train[self.features])[:, self.class_idx]
+        self.df_test['prob'] = self.model.predict_proba(self.df_test[self.features])[:, self.class_idx]
+        
+        self.prediction = 'prob'
+        
+        self.df_valid = None
+        
     def plot_EDA(self, ylimits=None):
         
         print('Plotting EDA')
@@ -36,28 +217,38 @@ class ModelValidation:
         # days_since_last_purchase_evaldate
         _, axs = plt.subplots(1, 2, figsize=(28, 10))
         GenPlots.plot_distributions(self.df_orders, 'days_since_last_purchase_evaldate', bounds=[50, 100, 150, 200, 250, 300], 
-                                    labels=['050', '050-100', '100-150', '150-200', '200-250', '250-300'], other='>300', ax=axs[0], plot_mean=True, legend=False)
+                                    labels=['050', '050-100', '100-150', '150-200', '200-250', '250-300'], other='>300', ax=axs[0],
+                                    plot_mean=True, legend=False)
         GenPlots.plot_distributions(self.df_valid, 'days_since_last_purchase_evaldate', bounds=[50, 100, 150, 200, 250, 300], 
-                                    labels=['050', '050-100', '100-150', '150-200', '200-250', '250-300'], other='>300',  ax=axs[1], plot_mean=True)
+                                    labels=['050', '050-100', '100-150', '150-200', '200-250', '250-300'], other='>300',  ax=axs[1],
+                                    plot_mean=True)
 
-        df_orders = GenUtilities.dynamic_variable_definition(self.df_orders, variable='days_since_last_purchase_evaldate', boundaries=[50, 100, 150, 200, 250, 300], 
+        df_orders = GenUtilities.dynamic_variable_definition(self.df_orders, variable='days_since_last_purchase_evaldate', 
+                                                             boundaries=[50, 100, 150, 200, 250, 300], 
                                                              name='days_since_last_purchase_evaldate_grouped', 
-                                                             labels=['050', '050-100', '100-150', '150-200', '200-250', '250-300'], otherwise='>300')   
-        df_valid = GenUtilities.dynamic_variable_definition(self.df_valid, variable='days_since_last_purchase_evaldate', boundaries=[50, 100, 150, 200, 250, 300], 
+                                                             labels=['050', '050-100', '100-150', '150-200', '200-250', '250-300'],
+                                                             otherwise='>300')   
+        df_valid = GenUtilities.dynamic_variable_definition(self.df_valid, variable='days_since_last_purchase_evaldate', 
+                                                            boundaries=[50, 100, 150, 200, 250, 300], 
                                                             name='days_since_last_purchase_evaldate_grouped', 
-                                                            labels=['050', '050-100', '100-150', '150-200', '200-250', '250-300'], otherwise='>300')  
+                                                            labels=['050', '050-100', '100-150', '150-200', '200-250', '250-300'],
+                                                            otherwise='>300')  
         _, axs = plt.subplots(1, 2, figsize=(28, 10))
         GenPlots.plot_rates(df_orders, self.target, groupby='days_since_last_purchase_evaldate_grouped', ax=axs[0], ylimits=ylimits)
         GenPlots.plot_rates(df_valid, self.target, groupby='days_since_last_purchase_evaldate_grouped', ax=axs[1], ylimits=ylimits)
 
         # sum_totaldiscount
         _, axs = plt.subplots(1, 2, figsize=(28, 10))
-        GenPlots.plot_distributions(self.df_orders, 'sum_totaldiscount', bounds=[0, 10], labels=['£0', '£0-10'], other='>£10', ax=axs[0], plot_mean=True, legend=False)
-        GenPlots.plot_distributions(self.df_valid, 'sum_totaldiscount', bounds=[0, 10], labels=['£0', '£0-10'], other='>£10',  ax=axs[1], plot_mean=True)
+        GenPlots.plot_distributions(self.df_orders, 'sum_totaldiscount', bounds=[0, 10], labels=['£0', '£0-10'], 
+                                    other='>£10', ax=axs[0], plot_mean=True, legend=False)
+        GenPlots.plot_distributions(self.df_valid, 'sum_totaldiscount', bounds=[0, 10], labels=['£0', '£0-10'], 
+                                    other='>£10',  ax=axs[1], plot_mean=True)
 
-        df_orders = GenUtilities.dynamic_variable_definition(self.df_orders, variable='sum_totaldiscount', boundaries=[0, 10], name='sum_totaldiscount_grouped', 
+        df_orders = GenUtilities.dynamic_variable_definition(self.df_orders, variable='sum_totaldiscount', 
+                                                             boundaries=[0, 10], name='sum_totaldiscount_grouped', 
                                                              labels=['£0', '£0-10'], otherwise='>£10')   
-        df_valid = GenUtilities.dynamic_variable_definition(self.df_valid, variable='sum_totaldiscount', boundaries=[0, 10], name='sum_totaldiscount_grouped', 
+        df_valid = GenUtilities.dynamic_variable_definition(self.df_valid, variable='sum_totaldiscount', 
+                                                            boundaries=[0, 10], name='sum_totaldiscount_grouped', 
                                                             labels=['£0', '£0-10'], otherwise='>£10')  
         _, axs = plt.subplots(1, 2, figsize=(28, 10))
         GenPlots.plot_rates(df_orders, self.target, groupby='sum_totaldiscount_grouped', ax=axs[0], ylimits=ylimits)
@@ -211,7 +402,7 @@ class ModelValidation:
 
         return df_summary
   
-    def plot_ave(self, date=None, filter=None, dataset='valid', n_cuts=10):
+    def plot_ave(self, id_var, date=None, filter=None, dataset='test', n_cuts=10):
         
         if dataset == 'valid':
             df = self.df_valid.copy()
@@ -233,12 +424,13 @@ class ModelValidation:
 
         figs, axs = plt.subplots(1, 2, figsize=(35, 10))      
 
-        for df, title, ax in zip([self.df_test, self.df_valid], ['Test', 'Valid (OOT)'], axs):
+        for df, title, ax in zip([self.df_train, self.df_test], ['Train', 'Test'], axs):
 
             labels = [f'q{n}' for n in range(0, n_cuts)]
             df['cut'] = pd.cut(df[self.prediction], bins=n_cuts)
-            summary = df.groupby('cut').agg({'individualid': len, self.prediction: 'mean', self.target: 'mean'}).reset_index()\
-                                       .rename(columns={'individualid': 'volume', self.prediction: f'mean_{self.prediction}', self.target: 'actual_rate'})
+            summary = df.groupby('cut', observed=False).agg({id_var: len, self.prediction: 'mean', self.target: 'mean'}).reset_index()\
+                                       .rename(columns={id_var: 'volume', self.prediction: f'mean_{self.prediction}', 
+                                                        self.target: 'actual_rate'})
 
             ax_twin = ax.twinx()
 
@@ -255,7 +447,7 @@ class ModelValidation:
             ax.grid(False)
             ax_twin.grid(True)
             ax.legend(['Volume'], loc=2)
-            ax_twin.legend(['Mean Probability of Lapse', 'Actual Lapse Rate'], loc=2, bbox_to_anchor=(0, 0.95));
+            ax_twin.legend(['Mean Probability of Outcome', 'Actual Outcome Rate'], loc=2, bbox_to_anchor=(0, 0.95));
                 
     def plot_sliding_auc(self, dataset='valid'):
       
@@ -268,15 +460,15 @@ class ModelValidation:
         dayslist = [5, 10, 15, 30, 60, 90, 120, 150, 160, 180, 210, 240, 270, 300, 330, 365]
         for days_end in dayslist:
 
-          df_eval = df_in[(df_in.days_since_last_purchase_evaldate < days_end)]
+            df_eval = df_in[(df_in.days_since_last_purchase_evaldate < days_end)]
 
-          y = df_eval[self.target].values
-          y_pred = df_eval[self.prediction].values
-          volume = df_eval.shape[0] / df_in.shape[0] 
+            y = df_eval[self.target].values
+            y_pred = df_eval[self.prediction].values
+            volume = df_eval.shape[0] / df_in.shape[0] 
 
-          auc = metrics.roc_auc_score(y, y_pred)
-          df = pd.DataFrame(dict(days_since_last_order_limit=days_end, auc=auc, pct_of_total_volume=volume), index=[0])
-          df_auc = pd.concat([df_auc, df])
+            auc = metrics.roc_auc_score(y, y_pred)
+            df = pd.DataFrame(dict(days_since_last_order_limit=days_end, auc=auc, pct_of_total_volume=volume), index=[0])
+            df_auc = pd.concat([df_auc, df])
 
         plt.rcParams.update({'font.size': 24})
         fig, ax = plt.subplots(figsize=(20, 12))
@@ -369,8 +561,8 @@ class ModelValidation:
 
         plt.show()
         
-    def plot_risk_segments(self, df=None, on=None, date=None, risk_segs=['Very Low', 'Low', 'Medium', 'High', 'Very High'], fontsize=16, 
-                           title='Model Risk Segment Volumes'):
+    def plot_risk_segments(self, df=None, on=None, date=None, risk_segs=['Very Low', 'Low', 'Medium', 'High', 'Very High'],
+                           fontsize=16, title='Model Risk Segment Volumes'):
         
         if df is None:
             df = self.df_orders
@@ -519,7 +711,11 @@ class ModelValidation:
     def produce_metrics_table(self):
         i = 0
         summaries = []
-        for df, label in zip([self.df_train, self.df_test, self.df_valid], ['train', 'test', 'valid']):
+        
+        dataframes = [self.df_train, self.df_test]
+        labels = ['train', 'test']
+        
+        for df, label in zip(dataframes, labels):
             if df is not None:
                 
                 fpr, tpr, _ = metrics.roc_curve(df[self.target], df[self.prediction])
@@ -570,7 +766,7 @@ class ModelValidation:
         self.metrics_summary = pd.concat(summaries, axis=0)
         self.metrics_summary_simple = self.metrics_summary[['dset', 'auc', 'avg_precision_micro_avg']]
         
-    def plot_curves(self, on='valid', figsize=(30, 10), fontsize=16):
+    def plot_curves(self, on='test', figsize=(30, 10), fontsize=16):
         
         if isinstance(on, pd.DataFrame):
             df = on
@@ -581,8 +777,6 @@ class ModelValidation:
             df = self.df_test
         elif on == 'train':
             df = self.df_train
-        else:
-            df = self.df_orders
             
         target_label = GenUtilities.capitalise_strings(self.target)
 
@@ -657,19 +851,16 @@ class ModelValidation:
           fontsize = 16
         );        
         
-    def produce_cutoff_summary(self, on='valid', cutoff_freq=0.05):
+    def produce_cutoff_summary(self, cutoff_freq=0.05):
 
-        if on == 'valid':
-            df = self.df_valid.copy()
-        else:
-            df = self.df_orders.copy()
-            
+        df = self.df_test.copy()
+
         range_ = np.arange(0, 1 + cutoff_freq, cutoff_freq)
 
         frames = []
         for cutoff in range_:
 
-            print('\r', f'Assessing cutoff: {cutoff}', end='')
+            # print('\r', f'Assessing cutoff: {cutoff}', end='')
 
             df['prediction'] = np.where(df[self.prediction] >= cutoff, 1, 0)
 
@@ -728,7 +919,7 @@ class ModelValidation:
                 frames.append(frame)
 
         self.df_cutoff_summary = pd.concat(frames)   
-        self.df_cutoff_report = df_report
+        self.df_cutoff_report = df_report.reset_index(drop=True)
         
     def plot_precision(self):
       
@@ -759,14 +950,11 @@ class ModelValidation:
         ax.set_xticks(np.arange(0, 1.1, 0.1))
         ax.yaxis.set_major_formatter(mtick.PercentFormatter(1));
     
-    def plot_cumulative_response(self, on='valid', plot_tpr=True):
+    def plot_cumulative_response(self, plot_tpr=True):
 
         plt.rcParams.update({'font.size': 16})
         fig, axs = plt.subplots(1, 2, figsize=(25, 6))
-        if on=='valid':
-            df = self.df_valid
-        else:
-            df = self.df_test
+        df = self.df_test
             
         target = GenUtilities.capitalise_strings(self.target)
         
@@ -848,10 +1036,42 @@ class ModelValidation:
         ax.xaxis.set_major_formatter(mtick.PercentFormatter(10))
         ax.set_ylabel(f'% of Captured {target}s/Non-{target}s', fontsize=16)
         ax.set_xlabel('Volume Percentage of Sample Included (Top X Pct)', fontsize=16)
-        ax.set_title(f'KS Statistic Plot (% of Responders/Non-Responders ({target}s/Non-{target}s) by Volume % of Population)', fontsize=16)
+        ax.set_title(f'KS Statistic Plot \n (% of Responders/Non-Responders ({target}s/Non-{target}s) \n by Volume % of Population)', fontsize=16)
         ax.yaxis.set_major_formatter(mtick.PercentFormatter(100))
         ax.set_yticks(np.arange(0, 110, 10))
         ax.set_xticks(np.arange(0, 11, 1));
+        
+        fig, axs = plt.subplots(1, 2, figsize=(25, 6))
+        ax=axs[0]
+        ax.plot(self.df_cutoff_report.cutoff, self.df_cutoff_report.accuracy)
+        ax.plot(self.df_cutoff_report.cutoff, self.df_cutoff_report.positive_vol_pct)
+        # ax.axhline(random_response, linestyle='--', color='black')
+        # if plot_tpr:
+        #     ax.plot(self.df_cutoff_report.positive_vol_pct, self.df_cutoff_report.true_positive_rate)
+        #     ax.legend(['Precision', 'Precision of Random', f'% of {target}s Captured (True Positive Rate)'])
+        # else:
+        #     ax.legend(['Precision', 'Precision of Random']) 
+        ax.set_xlabel('Cutoff', fontsize=16)
+        ax.set_ylabel('Accuracy', fontsize=16)
+        ax.set_title('Accuracy and Positive Percentage Classified', fontsize=16)
+        ax.xaxis.set_major_formatter(mtick.PercentFormatter(1))
+        ax.yaxis.set_major_formatter(mtick.PercentFormatter(1))
+        ax.set_yticks(np.arange(0.1, 1.1, 0.1))
+        ax.set_xticks(np.arange(0, 1.1, 0.1))
+        ax.set_xlim([0,1])
+        ax.set_ylim([0,1])
+        ax.legend(['Accuracy', 'Percentage Classified as Positive']) ;     
+
+        # ax=axs[1]
+        # kds.metrics.plot_ks_statistic(df[self.target], df[self.prediction])
+        # ax.set_xticklabels([0, 0, 0.2, 0.4, 0.6, 0.8, 1])
+        # ax.xaxis.set_major_formatter(mtick.PercentFormatter(10))
+        # ax.set_ylabel(f'% of Captured {target}s/Non-{target}s', fontsize=16)
+        # ax.set_xlabel('Volume Percentage of Sample Included (Top X Pct)', fontsize=16)
+        # ax.set_title(f'KS Statistic Plot \n (% of Responders/Non-Responders ({target}s/Non-{target}s) \n by Volume % of Population)', fontsize=16)
+        # ax.yaxis.set_major_formatter(mtick.PercentFormatter(100))
+        # ax.set_yticks(np.arange(0, 110, 10))
+        # ax.set_xticks(np.arange(0, 11, 1));        
         
     def produce_interpretability(self, variables=None):
         
@@ -920,14 +1140,14 @@ class ModelValidation:
       
         if self.df_valid is None:
             self.df_valid = self.df_test
-            print('Warning, producing validation on the In-Time test sample since no Out-Of-Time sample supplied (data_scenario_val=None)')
+            # print('Warning, producing validation on the In-Time test sample since no Out-Of-Time sample supplied (data_scenario_val=None)')
             
         if self.target == 'engagement':
             print('Rounding activity dates to month start for monthly analysis of performance')
             self.df_orders['date'] = self.df_orders['date'].apply(lambda date: date.replace(day=1, hour=0, minute=0, second=0))
             self.df_valid['date'] = self.df_valid['date'].apply(lambda date: date.replace(day=1, hour=0, minute=0, second=0))
             
-        self.produce_auc()
+        # self.produce_auc()
         self.produce_cutoff_summary(cutoff_freq=cutoff_freq)
         
     def plot_customer_lapse_journeys(self, from_day='present', n_cust=3, query=None):
@@ -965,60 +1185,54 @@ class ModelValidation:
             ax.set_title(f'{individuals[i]}, {n_orders} orders, {n_orders_l2y} orders l2y, {n_orders_l6m} orders l6m');  
             ax.set_ylim([0, 1]);
         
-    def plot_validation(self, fontsize=16, reduced=False, n_features=5, feats_only=False, with_shapely=False, figsize=(25, 6)):
+    def plot_validation(self, fontsize=16, reduced=False, n_features=8, feats_only=False, with_shapely=False, figsize=(25, 6), 
+                        ylim=[0, 1]):
         
-        self.df_orders.dset_type = 'Train'
-        self.df_valid.dset_type = 'Valid'
+        self.df_train.dset_type = 'Train'
+        self.df_test.dset_type = 'Test'
         
         target_name = GenUtilities.capitalise_strings(self.target)
-        pop = pop_dict.get(self.population) 
-        
-        if self.population == '1':
-            bounds_dictionary = bounds_dictionary_1
-            feature_dictionary = feature_dictionary_1
-        else:
-            bounds_dictionary = bounds_dictionary_2plus
-            feature_dictionary = feature_dictionary_2plus
         
         self.produce_metrics_table()
-        
-        if self.target == 'next_order_conversion':
-            ylim = [0, 0.005]
-        else:
-            ylim = [0, 1]
-        
+           
         if with_shapely:
-            shapley = ShapleyPlots(self.model, self.df_valid, self.features, observation_id='individualid', target=self.target, feature_dictionary=feature_dictionary)
+            shapley = ShapleyPlots(self.model, self.df_test, self.features, observation_id='individualid', 
+                                   target=self.target, feature_dictionary=self.feature_dictionary)
             
         if feats_only:
-            ModelPlots.feature_importance(self.df_feature_importance, imp_type='gain', feature_dict=feature_dictionary, n_features=n_features, 
-                                          figsize=figsize, fontsize=fontsize, title=f'Feature Importance: {target_name}, {pop}') 
+            ModelPlots.feature_importance(self.df_feature_importance, imp_type='gain', feature_dict=self.feature_dictionary,
+                                          n_features=n_features, figsize=figsize, fontsize=fontsize, 
+                                          title=f'Feature Importance: {target_name}') 
             if with_shapely:
-                shapley.plot_importance(n_features=n_features, feature_dict=feature_dictionary, figsize=figsize, fontsize=fontsize)
+                shapley.plot_importance(n_features=n_features, feature_dict=self.feature_dictionary, figsize=figsize,
+                                        fontsize=fontsize)
             ModelPlots.target_interactions(self.df_orders, self.df_feature_importance.loc[0:n_features - 1, 'feature'], self.target, 
-                                           feature_dict=feature_dictionary, bounds_dictionary=bounds_dictionary, ylim=ylim)
+                                           feature_dict=self.feature_dictionary, bounds_dictionary=self.bounds_dictionary, ylim=ylim)
         elif reduced:
-            ModelPlots.feature_importance(self.df_feature_importance, imp_type='gain', figsize=figsize, fontsize=fontsize, feature_dict=feature_dictionary,
-                                          n_features=n_features) 
+            ModelPlots.feature_importance(self.df_feature_importance, imp_type='gain', figsize=figsize, fontsize=fontsize,
+                                          feature_dict=self.feature_dictionary, n_features=n_features) 
             if with_shapely:
-                shapley.plot_importance(n_features=n_features, feature_dict=feature_dictionary, figsize=figsize, fontsize=fontsize)
-            ModelPlots.target_interactions(self.df_orders, self.df_feature_importance.loc[0:n_features - 1, 'feature'], self.target, feature_dict=feature_dictionary,
-                                           bounds_dictionary=bounds_dictionary, ylim=ylim)
-            try:
-                self.plot_ave(n_cuts=5)
-            except:
-                pass                
+                shapley.plot_importance(n_features=n_features, feature_dict=self.feature_dictionary, figsize=figsize,
+                                        fontsize=fontsize)
+                
+            # ModelPlots.target_interactions(self.df_train, self.df_feature_importance.loc[0:n_features - 1, 'feature'], self.target,
+            #                                feature_dict=self.feature_dictionary, bounds_dictionary=self.bounds_dictionary, ylim=ylim)
+
+            self.plot_ave(id_var=self.id_var, n_cuts=5)
             self.plot_cumulative_response()
             self.plot_curves()
         else:
             self.plot_risk_segments(on='valid', title=f'Model Segments: {target_name}')
             _, axs = plt.subplots(1, 2, figsize=(35, 10))
-            ModelPlots.feature_importance(self.df_feature_importance, imp_type='gain', ax=axs[0], feature_dict=feature_dictionary, n_features=n_features)
-            ModelPlots.feature_importance(self.df_feature_importance, imp_type='splits', ax=axs[1], feature_dict=feature_dictionary, n_features=n_features)
+            ModelPlots.feature_importance(self.df_feature_importance, imp_type='gain', ax=axs[0], 
+                                          feature_dict=self.feature_dictionary, n_features=n_features)
+            ModelPlots.feature_importance(self.df_feature_importance, imp_type='splits', ax=axs[1], 
+                                          feature_dict=self.feature_dictionary, n_features=n_features)
             if with_shapely:
-                shapley.plot_importance(n_features=n_features, feature_dict=feature_dictionary, figsize=figsize, fontsize=fontsize)
+                shapley.plot_importance(n_features=n_features, feature_dict=self.feature_dictionary, figsize=figsize,
+                                        fontsize=fontsize)
             ModelPlots.target_interactions(self.df_orders, self.df_feature_importance.loc[0:n_features - 1, 'feature'], self.target,
-                                           feature_dict=feature_dictionary, bounds_dictionary=bounds_dictionary, ylim=ylim)
+                                           feature_dict=self.feature_dictionary, bounds_dictionary=self.bounds_dictionary, ylim=ylim)
             LapseMonitoring.plot_feature_stability(self.df_orders, self.df_valid, self.df_feature_importance, self.features)
             try:
                 self.plot_ave(n_cuts=7)
@@ -1032,3 +1246,155 @@ class ModelValidation:
             self.plot_monthly_auprc()
             self.plot_sliding_auc()
             
+            
+
+
+# class RandomForestExplainer:
+    
+#     def __init__(self, model):
+        
+#         self.model = model
+#         self.features = list(model.__dict__['feature_names_in_'])
+        
+#     def traverse_tree(self, tree_index, tree_):
+        
+#         data = []
+#         for node_index in range(tree_.node_count):
+#             if tree_.children_left[node_index] != -1:
+#                 left_child_index = tree_.children_left[node_index]
+#                 right_child_index = tree_.children_right[node_index]
+
+#                 split_variable = tree_.feature[node_index]
+#                 split_threshold = tree_.threshold[node_index]
+
+#                 left_child_class_volumes = tree_.value[left_child_index][0]
+#                 right_child_class_volumes = tree_.value[right_child_index][0]
+
+#                 left_child_class_rate = left_child_class_volumes[1] / (left_child_class_volumes[0] + left_child_class_volumes[1])
+#                 right_child_class_rate = right_child_class_volumes[1] / (right_child_class_volumes[0] + right_child_class_volumes[1])
+
+#                 data.append({
+#                     'tree_number': tree_index,
+#                     'node_number': node_index,
+#                     'left_child_node': left_child_index,
+#                     'right_child_node': right_child_index,
+#                     'left_child_class_volumes': left_child_class_volumes,
+#                     'left_child_class_rate': left_child_class_rate,
+#                     'right_child_class_volumes': right_child_class_volumes,
+#                     'right_child_class_rate': right_child_class_rate,
+#                     'split_threshold': split_threshold,
+#                     'split_variable': feat_vars[split_variable]
+#                 })  
+        
+#         return pd.DataFrame(data)
+                
+#     def traverse_forest(self):
+        
+#         dfs = []
+#         for tree_index, tree in enumerate(model.estimators_): 
+#             tree_ = tree.tree_
+#             df_tree = self.traverse_tree(tree_index, tree_)
+#             dfs.append(df_tree)
+        
+#         self.df_trees = pd.concat(dfs)
+        
+#         self.df_trees['direction_for_class_1'] = np.where(self.df_trees['left_child_class_rate'] > \
+#                                                           self.df_trees['right_child_class_rate'], 
+#                                                           'left', 
+#                                                           'right')
+
+
+
+# data = []
+# for tree_index, tree in enumerate(model.estimators_):
+#     tree_ = tree.tree_
+#     for node_index in range(tree_.node_count):
+#         if tree_.children_left[node_index] != -1:  # Check if it's not a leaf node
+#             left_child_index = tree_.children_left[node_index]
+#             right_child_index = tree_.children_right[node_index]
+            
+#             split_variable = tree_.feature[node_index]
+#             split_threshold = tree_.threshold[node_index]
+            
+#             left_child_class_volumes = tree_.value[left_child_index][0]
+#             right_child_class_volumes = tree_.value[right_child_index][0]
+            
+#             left_child_class_rate = left_child_class_volumes[1] / (left_child_class_volumes[0] + left_child_class_volumes[1])
+#             right_child_class_rate = right_child_class_volumes[1] / (right_child_class_volumes[0] + right_child_class_volumes[1])
+            
+#             data.append({
+#                 'tree_number': tree_index,
+#                 'node_number': node_index,
+#                 'left_child_node': left_child_index,
+#                 'right_child_node': right_child_index,
+#                 'left_child_class_volumes': left_child_class_volumes,
+#                 'left_child_class_rate': left_child_class_rate,
+#                 'right_child_class_volumes': right_child_class_volumes,
+#                 'right_child_class_rate': right_child_class_rate,
+#                 'split_threshold': split_threshold,
+#                 'split_variable': feat_vars[split_variable]
+#             })
+
+
+# df = pd.DataFrame(data)
+
+# df['direction_for_class_1'] = np.where(df['left_child_class_rate'] > df['right_child_class_rate'], 'left', 'right')
+
+# df
+
+
+
+
+
+# from sklearn.tree import _tree
+
+# class RandomForestTraversal:
+    
+#     def __init__(self, model):
+        
+#         self.model = model
+#         self.features = model
+        
+        
+# def tree_traversal(tree_, feature_names, tree_number):
+
+#     feature_names = [
+#         feature_names[i] if i != _tree.TREE_UNDEFINED else "undefined!"
+#         for i in tree_.feature
+#     ]
+
+#     def recurse(node, df_all_nodes):
+  
+#         if tree_.feature[node] != _tree.TREE_UNDEFINED:
+#             name = feature_names[node]
+#             threshold = tree_.threshold[node]
+#             df_node = pd.DataFrame({'node':node, 'feature':name, 'threshold':threshold}, index=[node])
+            
+#             df_all_nodes = pd.concat([df_all_nodes, df_node])
+#             left_node = tree_.children_left[node]
+#             right_node = tree_.children_right[node]
+            
+#             # is_split_node = tree_.children_left[node_id] != tree_.children_right[node_id]
+            
+#             if tree_.feature[left_node] != -2:
+#                 df_left_nodes = recurse(left_node, df_all_nodes)
+#                 df_all_nodes = pd.concat([df_all_nodes, df_left_nodes])
+#             if tree_.feature[right_node] != -2:
+#                 df_right_nodes = recurse(right_node, df_all_nodes)
+#                 df_all_nodes = pd.concat([df_all_nodes, df_right_nodes])
+         
+#         return df_all_nodes
+
+#     df = recurse(0, pd.DataFrame())
+    
+#     df['tree'] = tree_number
+    
+#     return df[['tree', 'node', 'feature', 'threshold']]
+
+# dfs = []
+# for i, estimator in enumerate(model.estimators_):
+#     tree = estimator.__dict__['tree_']
+#     df = tree_traversal(tree, feat_vars, i)
+#     dfs.append(df)
+    
+# df_trees = pd.concat(dfs)
