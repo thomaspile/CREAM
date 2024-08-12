@@ -13,7 +13,7 @@ from sklearn.pipeline import Pipeline
 # from sklearn.utils.testing import ignore_warnings
 # from sklearn.exceptions import ConvergenceWarning
 from xgboost.sklearn import XGBClassifier, XGBRegressor
-# from lightgbm import LGBMClassifier, LGBMRegressor
+from lightgbm import LGBMClassifier, LGBMRegressor
 # import lightgbm as lgb
 from sklearn.metrics import classification_report, roc_auc_score, mean_squared_error, explained_variance_score, r2_score
 from sklearn import metrics
@@ -73,11 +73,11 @@ class ModelBuilder:
         if not os.path.isdir(folder):
             os.makedirs(folder)
         
-            for object_, label in zip(files, labels):
-                with open(folder + '/' + label + '.pkl', 'wb') as file:
-                    pickle.dump(object_, file)
+        for object_, label in zip(files, labels):
+            with open(folder + '/' + label + '.pkl', 'wb') as file:
+                pickle.dump(object_, file)
             
-    def build_rf(self, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, params=None, n_jobs=-1, seed=123, outcome_type='classification', export_to=None):
+    def build_rf(self, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, feats=None, params=None, n_jobs=-1, seed=123, outcome_type='classification', export_to=None):
 
         random.seed(seed)
         if params is None:
@@ -94,8 +94,11 @@ class ModelBuilder:
         else:
             model = RandomForestRegressor(n_jobs=n_jobs, random_state=seed)
         model.set_params(**params)
-
-        model.fit(X_train, y_train)
+        
+        if feats is None:
+            feats = X_train.columns
+            
+        model.fit(X_train[feats], y_train)
 
         if X_valid is None:
             y_valid = None
@@ -104,17 +107,23 @@ class ModelBuilder:
             y_valid = None 
 
         if outcome_type == 'classification':
-            metrics = self.evaluate_classifier(model, X_train, y_train, X_test, y_test, X_valid, y_valid, cutoff=cutoff, ret=True)
+            metrics = self.evaluate_classifier(model, X_train[feats], y_train, X_test[feats], y_test, X_valid, y_valid, cutoff=cutoff, ret=True)
             label_with = 'test_auc'
         else:
-            metrics = self.evaluate_regressor(model, X_train, y_train, X_test, y_test, X_valid, y_valid, ret=True)
+            metrics = self.evaluate_regressor(model, X_train[feats], y_train, X_test[feats], y_test, X_valid, y_valid, ret=True)
             label_with = 'test_rsquared'
 
-        importance = self.feature_importances(model, X_train.columns, model_type='rf')
+        importance = self.feature_importances(model, X_train[feats].columns, model_type='rf')
         
         if export_to is not None:
-            self.export_model_objects(export_to, model, X_train, y_train, X_test, y_test, params, metrics, label_with=label_with)
-
+            if export_to.endswith('/'):
+                folder_extension = f'{y_train.name}/'
+            else:
+                folder_extension = f'/{y_train.name}/'
+                
+            self.export_model_objects(export_to + folder_extension, model, X_train[feats], y_train, 
+                                      X_test[feats], y_test, params, metrics,
+                                      label_with=label_with)
         return model, importance, metrics
 
     def build_xgb(self, X_train, y_train, X_test, y_test, X_valid, y_valid, params, n_jobs=1, seed=123, outcome_type='classification'):
@@ -173,7 +182,8 @@ class ModelBuilder:
         lgb = LightGBMClassifier(**params)
         model = lgb.fit(train)
 
-    def build_lgb(self, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, params=None, n_jobs=1, seed=123, early_stopping_rounds=False, outcome_type='classification'):
+    def build_lgb(self, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, params=None, feats=None, 
+                  n_jobs=1, seed=123, early_stopping_rounds=False, outcome_type='classification', export_to=None):
 
         random.seed(seed)
 
@@ -258,17 +268,20 @@ class ModelBuilder:
                 eval_metric = 'rmse'  
 
         model.set_params(**params)
+        
+        if feats is None:
+            feats = X_train.columns
                 
         if early_stopping != False:  
-            model.fit(X_train, 
+            model.fit(X_train[feats], 
                       y_train,
                       callbacks=[early_stopping],
                       eval_metric=eval_metric,
-                      eval_set=[(X_test, y_test)])
+                      eval_set=[(X_test[feats], y_test)])
              
         else:
             model.set_params(**params)
-            model.fit(X_train, y_train)
+            model.fit(X_train[feats], y_train)
 
         print(f'LGB built in {round(time() - t0, 3)} seconds')
         
@@ -279,13 +292,26 @@ class ModelBuilder:
             y_valid = None 
         
         if outcome_type == 'classification':
-            errors = self.evaluate_classifier(model, X_train, y_train, X_test, y_test, X_valid, y_valid, cutoff=cutoff, ret=True)
+            metrics = self.evaluate_classifier(model, X_train[feats], y_train, X_test[feats], y_test, X_valid, y_valid,
+                                              cutoff=cutoff, ret=True)
+            label_with = 'test_auc'
         else:
-            errors = self.evaluate_regressor(model, X_train, y_train, X_test, y_test, X_valid, y_valid, ret=True)
+            metrics = self.evaluate_regressor(model, X_train[feats], y_train, X_test[feats], y_test, X_valid, y_valid, ret=True)
+            label_with = 'test_rsquared'
 
-        importance = self.feature_importances(model, X_train.columns)
+        importance = self.feature_importances(model, X_train[feats].columns)
+        
+        if export_to is not None:
+            if export_to.endswith('/'):
+                folder_extension = f'{y_train.name}/'
+            else:
+                folder_extension = f'/{y_train.name}/'
+                
+            self.export_model_objects(export_to + folder_extension, model, X_train[feats], y_train, 
+                                      X_test[feats], y_test, params, metrics,
+                                      label_with=label_with)
 
-        return model, importance, errors
+        return model, importance, metrics
       
     def build_lasso(self, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, params=None):
         
@@ -900,10 +926,11 @@ class OptimalModel:
                                                                   model_params, outcome_type=self.outcome_type, 
                                                                   n_jobs=self.n_jobs, seed=self.seed)
             elif self.model_type == 'rf':
-                model, importance, errors = builder.build_rf(self.X_train[self.cols], self.y_train, 
-                                                             self.X_test[self.cols], self.y_test, 
-                                                             self.X_valid[self.cols], self.y_valid, 
-                                                             model_params, outcome_type=self.outcome_type, 
+                model, importance, errors = builder.build_rf(self.X_train, self.y_train, 
+                                                             self.X_test, self.y_test, 
+                                                             self.X_valid, self.y_valid, 
+                                                             params=model_params, feats=self.cols,
+                                                             outcome_type=self.outcome_type, 
                                                              n_jobs=self.n_jobs, seed=self.seed)
             elif self.model_type == 'dnn':
                 model, errors = builder.build_dnn(X_train[cols], y_train, X_test[cols], y_test, X_valid[cols], y_valid, model_params)
@@ -943,9 +970,10 @@ class OptimalModel:
             importance = pd.DataFrame()
             errors = {}
                 
-        print(f'Best parameters found: {params}')
         if cv_scores is not None:
             print(f'Cross validation scores: {cv_scores}')
+            
+        print(f'params = {params}')
         
         return model, params, trials, importance, errors, cv_scores
     

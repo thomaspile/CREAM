@@ -116,7 +116,7 @@ class RandomForestExplainer:
     def traverse_forest(self, individual):
         
         dfs = []
-        for tree_index, tree in enumerate(model.estimators_): 
+        for tree_index, tree in enumerate(self.model.estimators_): 
             tree_ = tree.tree_
             df_tree = self.traverse_tree(tree_index, tree_, individual)
             dfs.append(df_tree)
@@ -460,51 +460,7 @@ class ModelValidation:
             ax.grid(False)
             ax_twin.grid(True)
             ax.legend(['Volume'], loc=2)
-            ax_twin.legend(['Mean Probability of Outcome', 'Actual Outcome Rate'], loc=2, bbox_to_anchor=(0, 0.95));
-                
-    def plot_sliding_auc(self, dataset='valid'):
-      
-        if dataset == 'valid':
-            df_in = self.df_valid
-        else:
-            df_in = self.df_orders
-            
-        df_auc = pd.DataFrame()
-        dayslist = [5, 10, 15, 30, 60, 90, 120, 150, 160, 180, 210, 240, 270, 300, 330, 365]
-        for days_end in dayslist:
-
-            df_eval = df_in[(df_in.days_since_last_purchase_evaldate < days_end)]
-
-            y = df_eval[self.target].values
-            y_pred = df_eval[self.prediction].values
-            volume = df_eval.shape[0] / df_in.shape[0] 
-
-            auc = metrics.roc_auc_score(y, y_pred)
-            df = pd.DataFrame(dict(days_since_last_order_limit=days_end, auc=auc, pct_of_total_volume=volume), index=[0])
-            df_auc = pd.concat([df_auc, df])
-
-        plt.rcParams.update({'font.size': 24})
-        fig, ax = plt.subplots(figsize=(20, 12))
-
-        ax.plot(df_auc['days_since_last_order_limit'], df_auc['auc'], linewidth=5)
-        ax.set_title(f'Area Under the Curve Against Days Since Last Order Cutoff')
-        plt.xlabel('Days Since Last Order Cutoff')
-        plt.ylabel('AUC');
-
-        ax2 = ax.twinx()
-
-        df_auc.plot('days_since_last_order_limit', 'auc', ax=ax, color='red', linewidth=5)
-        df_auc.plot('days_since_last_order_limit', 'pct_of_total_volume', ax=ax2, color='blue', linewidth=5, linestyle='dotted')
-        ax.set_title('Area Under the Curve Against Days Since Last Order Cutoff')
-        ax.set_xlabel('Days Since Last Order Cutoff', fontsize=18, y=1.5)
-        ax.set_ylabel('AUC', fontsize=18)
-        ax2.set_ylabel('Volume %', fontsize=18)
-        ax2.set_ylim([0, 1])
-        ax2.yaxis.set_major_formatter(mtick.PercentFormatter(1))
-        ax.grid(False)
-        ax2.grid(True)
-        ax.legend(['AUC'], loc=2)
-        ax2.legend(['Percentage of Sample Volume Included'], loc=2, bbox_to_anchor=(0, 0.90));       
+            ax_twin.legend(['Mean Probability of Outcome', 'Actual Outcome Rate'], loc=2, bbox_to_anchor=(0, 0.95));      
         
     def plot_monthly_auc(self, fontsize=16):
       
@@ -890,6 +846,7 @@ class ModelValidation:
             accuracy = (tp + tn) / (tp + fp + tn + fn)
 
             positive_vol_pct = n_positive_predictions / (n_positive_actuals + n_negative_actuals)
+            negative_vol_pct = n_negative_predictions / (n_positive_actuals + n_negative_actuals)
             true_positive_rate = recall = sensitivity = tp / n_positive_actuals if n_positive_actuals != 0 else np.nan  # Percentage of positive actuals that are correctly predicted positive
             true_negative_rate = specificity = tn / n_negative_actuals if n_negative_actuals != 0 else np.nan  # Percentage of negative actuals that are correctly predicted negative        
             false_positive_rate = fp / n_negative_actuals if n_negative_actuals != 0 else np.nan  # Percentage of negative actuals that are incorrectly predicted positive
@@ -902,11 +859,18 @@ class ModelValidation:
             f1_score = (2 * precision * recall) / (precision + recall) if (precision + recall) != 0 else np.nan
             g_mean = np.sqrt(recall * specificity)
 
-            frames.append(pd.DataFrame({'cutoff': cutoff, 'positive_vol_pct':positive_vol_pct, 'n_positive_actuals':n_positive_actuals, 'tp':tp, 'fp':fp, 'accuracy':accuracy, 'f1_score':f1_score, 'g_mean':g_mean, 
+            frames.append(pd.DataFrame({'cutoff': cutoff, 'positive_vol_pct':positive_vol_pct,
+                                        'negative_vol_pct':negative_vol_pct,
+                                        'n_positive_actuals':n_positive_actuals, 
+                                        'n_negative_actuals':n_negative_actuals,
+                                        'tp':tp, 'fp':fp, 'accuracy':accuracy,
+                                        'f1_score':f1_score, 'g_mean':g_mean, 
                                         'true_positive_rate':true_positive_rate, 'true_negative_rate':true_negative_rate,
                                         'false_positive_rate':false_positive_rate, 'false_negative_rate':false_negative_rate,
-                                        'true_positive_prediction_rate':true_positive_prediction_rate, 'true_negative_prediction_rate':true_negative_prediction_rate,
-                                        'false_positive_prediction_rate':false_positive_prediction_rate, 'false_negative_prediction_rate':false_negative_prediction_rate}, index=[0]))
+                                        'true_positive_prediction_rate':true_positive_prediction_rate, 
+                                        'true_negative_prediction_rate':true_negative_prediction_rate,
+                                        'false_positive_prediction_rate':false_positive_prediction_rate,
+                                        'false_negative_prediction_rate':false_negative_prediction_rate}, index=[0]))
 
         df_report = pd.concat(frames) 
 
@@ -962,7 +926,108 @@ class ModelValidation:
         ax.set_yticks(np.arange(0.1, 1.1, 0.1))
         ax.set_xticks(np.arange(0, 1.1, 0.1))
         ax.yaxis.set_major_formatter(mtick.PercentFormatter(1));
+        
+    def plot_cumulative_response_binary(self, plot_tpr=True):
+
+        plt.rcParams.update({'font.size': 16})
+        fig, axs = plt.subplots(1, 2, figsize=(25, 6))
+        df = self.df_test
+            
+        target = GenUtilities.capitalise_strings(self.target)
+        
+        random_response_positive = df[self.target].mean()
+        random_response_negative = 1 - df[self.target].mean()
+
+        ax=axs[0]
+        ax.plot(self.df_cutoff_report.positive_vol_pct, self.df_cutoff_report.true_positive_prediction_rate)
+        ax.invert_xaxis()
+        ax.axhline(random_response_positive, linestyle='--', color='black')
+        if plot_tpr:
+            ax.plot(self.df_cutoff_report.positive_vol_pct, self.df_cutoff_report.true_positive_rate)
+            ax.legend(['Precision (% of Positive Predictions Correct)', 'Precision of Random', f'Recall (% of Positive {target}s Captured)'])
+        else:
+            ax.legend(['Precision', 'Precision of Random']) 
+        ax.set_xlabel('Volume Percentage of Sample Included (Top X Pct)', fontsize=16)
+        ax.set_ylabel('Precision', fontsize=16)
+        ax.set_title('Precision by Volume % of Population Ranked by Probability', fontsize=16)
+        ax.xaxis.set_major_formatter(mtick.PercentFormatter(1))
+        ax.yaxis.set_major_formatter(mtick.PercentFormatter(1))
+        ax.set_yticks(np.arange(0.1, 1.1, 0.1))
+        ax.set_xticks(np.arange(0, 1.1, 0.1))
+        ax.set_xlim([0,1])
+        ax.set_ylim([0,1]);
+        
+        ax=axs[1]
+        ax.plot(self.df_cutoff_report.negative_vol_pct, self.df_cutoff_report.true_negative_prediction_rate)
+        ax.invert_xaxis()
+        ax.axhline(random_response_negative, linestyle='--', color='black')
+        if plot_tpr:
+            ax.plot(self.df_cutoff_report.negative_vol_pct, self.df_cutoff_report.true_negative_rate)
+            ax.legend(['Precision (% of Negative Predictions Correct)', 'Precision of Random', f'Recall (% of Negative {target}s Captured)'])
+        else:
+            ax.legend(['Precision', 'Precision of Random']) 
+        ax.set_xlabel('Volume Percentage of Sample Included (Top X Pct)', fontsize=16)
+        ax.set_ylabel('Precision', fontsize=16)
+        ax.set_title('Precision by Volume % of Population Ranked by Probability', fontsize=16)
+        ax.xaxis.set_major_formatter(mtick.PercentFormatter(1))
+        ax.yaxis.set_major_formatter(mtick.PercentFormatter(1))
+        ax.set_yticks(np.arange(0.1, 1.1, 0.1))
+        ax.set_xticks(np.arange(0, 1.1, 0.1))
+        ax.set_xlim([0,1])
+        ax.set_ylim([0,1]);
+
+        fig, axs = plt.subplots(1, 2, figsize=(25, 6))
+        ax=axs[0]
+        ax.plot(self.df_cutoff_report['cutoff'], self.df_cutoff_report['positive_vol_pct'], linestyle='--')
+        ax.plot(self.df_cutoff_report['cutoff'], self.df_cutoff_report['true_positive_prediction_rate'])
+        # ax.legend()
+        ax.set_yticks(np.arange(0, 1.1, 0.1))
+        ax.set_ylim([0,1])
+        ax.set_title('Precision by Cutoff')
+        ax.set_xlabel('Cutoff')
+        ax.set_ylabel('Percentage')
+        ax.yaxis.set_major_formatter(mtick.PercentFormatter(1))
+        ax.xaxis.set_major_formatter(mtick.PercentFormatter(1))        
+        
+        ax=axs[1]
+        ax.plot(self.df_cutoff_report.cutoff, self.df_cutoff_report.accuracy)
+        ax.plot(self.df_cutoff_report.cutoff, self.df_cutoff_report.positive_vol_pct)
+        # ax.axhline(random_response, linestyle='--', color='black')
+        # if plot_tpr:
+        #     ax.plot(self.df_cutoff_report.positive_vol_pct, self.df_cutoff_report.true_positive_rate)
+        #     ax.legend(['Precision', 'Precision of Random', f'% of {target}s Captured (True Positive Rate)'])
+        # else:
+        #     ax.legend(['Precision', 'Precision of Random']) 
+        ax.set_xlabel('Cutoff', fontsize=16)
+        ax.set_ylabel('Accuracy', fontsize=16)
+        ax.set_title('Accuracy and Positive Percentage Classified', fontsize=16)
+        ax.xaxis.set_major_formatter(mtick.PercentFormatter(1))
+        ax.yaxis.set_major_formatter(mtick.PercentFormatter(1))
+        ax.set_yticks(np.arange(0.1, 1.1, 0.1))
+        ax.set_xticks(np.arange(0, 1.1, 0.1))
+        ax.set_xlim([0,1])
+        ax.set_ylim([0,1])
+        ax.legend(['Accuracy', 'Percentage Classified as Positive']); 
+        
+        kds.metrics.report(df[self.target], df[self.prediction], labels=False, title_fontsize=20, text_fontsize=12, figsize=(25, 12))
+
     
+
+        # ax=axs[1]
+        # ax.plot((1 - self.df_cutoff_report.cutoff), self.df_cutoff_report.true_positive_prediction_rate)
+        # if plot_tpr:
+        #     ax.plot((1 - self.df_cutoff_report.cutoff), self.df_cutoff_report.true_positive_rate)
+        #     ax.legend(['Precision', 'True Positive Rate'])
+        # ax.set_xlabel('Probability Cutoff', fontsize=16)
+        # ax.set_ylabel('Precision', fontsize=16)
+        # ax.set_title('Precision by Probability Cutoff', fontsize=16)
+        # ax.set_xlim([0,1])
+        # ax.set_ylim([0,1])
+        # ax.set_xticklabels([str(x) + '%' for x in np.arange(100, -10, -10)])
+        # ax.set_yticks(np.arange(0.1, 1.1, 0.1))
+        # ax.set_xticks(np.arange(0, 1.1, 0.1))
+        # ax.yaxis.set_major_formatter(mtick.PercentFormatter(1));      
+        
     def plot_cumulative_response(self, plot_tpr=True):
 
         plt.rcParams.update({'font.size': 16})
@@ -1228,11 +1293,12 @@ class ModelValidation:
                 shapley.plot_importance(n_features=n_features, feature_dict=self.feature_dictionary, figsize=figsize,
                                         fontsize=fontsize)
                 
-            # ModelPlots.target_interactions(self.df_train, self.df_feature_importance.loc[0:n_features - 1, 'feature'], self.target,
-            #                                feature_dict=self.feature_dictionary, bounds_dictionary=self.bounds_dictionary, ylim=ylim)
+            ModelPlots.target_interactions(self.df_train, self.df_feature_importance.loc[0:1, 'feature'],
+                                           self.target, idvar='date', feature_dict=self.feature_dictionary,
+                                           bounds_dictionary=self.bounds_dictionary, ylim=ylim)
 
             self.plot_ave(id_var=self.id_var, n_cuts=5)
-            self.plot_cumulative_response()
+            self.plot_cumulative_response_binary()
             self.plot_curves()
         else:
             self.plot_risk_segments(on='valid', title=f'Model Segments: {target_name}')
