@@ -29,7 +29,7 @@ from sklearn.inspection import PartialDependenceDisplay
 from sklearn.preprocessing import StandardScaler
 from collections import defaultdict
 
-from model_builder import OptimalModel, ModelBuilder, ModelPlots
+from model_builder import OptimalModel, ModelBuilder, ModelPlots, ShapleyPlots
 
 sys.path.insert(0, '/Users/thomaspile/Documents/GitHub/utilities')
 from utilities import GenUtilities, GenPlots
@@ -415,7 +415,7 @@ class ModelValidation:
 
         return df_summary
   
-    def plot_ave(self, id_var, date=None, filter=None, dataset='test', n_cuts=10):
+    def plot_ave(self, id_var, date=None, qcut=False, filter=None, dataset='test', n_cuts=10):
         
         if dataset == 'valid':
             df = self.df_valid.copy()
@@ -440,8 +440,12 @@ class ModelValidation:
         for df, title, ax in zip([self.df_train, self.df_test], ['Train', 'Test'], axs):
 
             labels = [f'q{n}' for n in range(0, n_cuts)]
-            df['cut'] = pd.cut(df[self.prediction], bins=n_cuts)
-            summary = df.groupby('cut', observed=False).agg({id_var: len, self.prediction: 'mean', self.target: 'mean'}).reset_index()\
+            if qcut:
+                df['cut'] = pd.qcut(df[self.prediction], q=n_cuts)
+            else:
+                df['cut'] = pd.cut(df[self.prediction], bins=n_cuts)
+            summary = df.groupby('cut', observed=False).agg({id_var: len, self.prediction: 'mean', 
+                                                             self.target: 'mean'}).reset_index()\
                                        .rename(columns={id_var: 'volume', self.prediction: f'mean_{self.prediction}', 
                                                         self.target: 'actual_rate'})
 
@@ -1288,16 +1292,16 @@ class ModelValidation:
                                            feature_dict=self.feature_dictionary, bounds_dictionary=self.bounds_dictionary, ylim=ylim)
         elif reduced:
             ModelPlots.feature_importance(self.df_feature_importance, imp_type='gain', figsize=figsize, fontsize=fontsize,
-                                          feature_dict=self.feature_dictionary, n_features=n_features) 
+                                          feature_dict=self.feature_dictionary, n_features=8) 
             if with_shapely:
                 shapley.plot_importance(n_features=n_features, feature_dict=self.feature_dictionary, figsize=figsize,
                                         fontsize=fontsize)
                 
-            ModelPlots.target_interactions(self.df_train, self.df_feature_importance.loc[0:1, 'feature'],
+            ModelPlots.target_interactions(self.df_train, self.df_feature_importance.loc[0:n_features - 1, 'feature'],
                                            self.target, idvar='date', feature_dict=self.feature_dictionary,
                                            bounds_dictionary=self.bounds_dictionary, ylim=ylim)
 
-            self.plot_ave(id_var=self.id_var, n_cuts=5)
+            self.plot_ave(id_var=self.id_var, qcut=False, n_cuts=5)
             self.plot_cumulative_response_binary()
             self.plot_curves()
         else:

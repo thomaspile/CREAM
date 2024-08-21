@@ -63,10 +63,11 @@ class Model:
 
 class ModelBuilder:
     
-    def export_model_objects(self, location, model, X_train, y_train, X_test, y_test, params, metrics, label_with='test_auc'):
+    def export_model_objects(self, location, model, X_train, y_train, X_test, y_test, params, metrics, importance,
+                             label_with='test_auc'):
                 
-        files = [model, X_train, y_train, X_test, y_test, params, metrics]
-        labels = ['model', 'X_train', 'y_train', 'X_test', 'y_test', 'params', 'metrics']
+        files = [model, X_train, y_train, X_test, y_test, params, metrics, importance]
+        labels = ['model', 'X_train', 'y_train', 'X_test', 'y_test', 'params', 'metrics', 'importance']
         
         folder = location + 'model_' + str(metrics[label_with])
         
@@ -122,8 +123,9 @@ class ModelBuilder:
                 folder_extension = f'/{y_train.name}/'
                 
             self.export_model_objects(export_to + folder_extension, model, X_train[feats], y_train, 
-                                      X_test[feats], y_test, params, metrics,
+                                      X_test[feats], y_test, params, metrics, importance,
                                       label_with=label_with)
+            
         return model, importance, metrics
 
     def build_xgb(self, X_train, y_train, X_test, y_test, X_valid, y_valid, params, n_jobs=1, seed=123, outcome_type='classification'):
@@ -183,7 +185,8 @@ class ModelBuilder:
         model = lgb.fit(train)
 
     def build_lgb(self, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, params=None, feats=None, 
-                  n_jobs=1, seed=123, early_stopping_rounds=False, outcome_type='classification', export_to=None):
+                  n_jobs=1, seed=123, early_stopping_rounds=False, outcome_type='classification', export_to=None,
+                  overwrite=False):
 
         random.seed(seed)
 
@@ -306,10 +309,11 @@ class ModelBuilder:
                 folder_extension = f'{y_train.name}/'
             else:
                 folder_extension = f'/{y_train.name}/'
-                
-            self.export_model_objects(export_to + folder_extension, model, X_train[feats], y_train, 
-                                      X_test[feats], y_test, params, metrics,
-                                      label_with=label_with)
+            
+            if not os.path.exists(export_to + folder_extension) or overwrite:
+                self.export_model_objects(export_to + folder_extension, model, X_train[feats], y_train, 
+                                          X_test[feats], y_test, params, metrics, importance,
+                                          label_with=label_with)
 
         return model, importance, metrics
       
@@ -1665,12 +1669,14 @@ class ModelPlots:
                 boundaries = bounds_dictionary.get(feats[0])
             else:
                 boundaries = None
-            GenPlots.plot_interactions(df, feats[0], feats_strings[0], target, boundaries=boundaries, idvar=idvar, remove_outliers=False, n_cuts=5, fontsize=fontsize,
-                                       title=f'{feats_strings[0]} vs {target_formatted} Rate', 
+            GenPlots.plot_interactions(df, feats[0], feats_strings[0], target, boundaries=boundaries, idvar=idvar,
+                                       remove_outliers=False, n_cuts=5, fontsize=fontsize,
+                                       title=f'{feats_strings[0]} \n vs {target_formatted} Rate', 
                                        ylabel=f'{target_formatted} Rate', ax=axs[0], ylim=ylim)
             boundaries = bounds_dictionary.get(feats[1])       
-            GenPlots.plot_interactions(df, feats[1], feats_strings[1], target, boundaries=boundaries, idvar=idvar, remove_outliers=False, n_cuts=5, fontsize=fontsize,
-                                       title=f'{feats_strings[1]} vs {target_formatted} Rate', 
+            GenPlots.plot_interactions(df, feats[1], feats_strings[1], target, boundaries=boundaries, idvar=idvar,
+                                       remove_outliers=False, n_cuts=5, fontsize=fontsize,
+                                       title=f'{feats_strings[1]} \n vs {target_formatted} Rate', 
                                        ylabel=f'{target_formatted} Rate', ax=axs[1], ylim=ylim)
             
     def ave_reg(df_predictions, outcome, predicted, n_cuts=10, ax=None, df_label=None):
