@@ -85,9 +85,9 @@ class TimeSeriesFeatures:
 
 class AppliedStrategy:
     
-    def __init__(self, df_train_in, df_test_in, cols, params, outcome_var=None, time_var='date', price_var='price', cutoff=None):
+    def __init__(self, df_train_in, df_test_in, cols, params, model=None, outcome_var=None, time_var='date', price_var='price', cutoff=None):
         
-        self.model = None
+        self.model = model
         
         self.df_train = df_train_in.copy()
         self.df_test = df_test_in.copy()
@@ -119,7 +119,9 @@ class AppliedStrategy:
                                                       None, None, 
                                                       self.model_params, outcome_type='classification', 
                                                       n_jobs=-1, seed=123)
-
+    
+    def predict(self):
+    
         self.df_train['pred'] = self.model.predict_proba(self.df_train[self.cols])[:, 1]  
         self.df_test['pred'] = self.model.predict_proba(self.df_test[self.cols])[:, 1] 
         
@@ -140,7 +142,9 @@ class AppliedStrategy:
     def plot_buys(self, label_wins=True, cutoff=None, figsize=(15, 5), plot_actuals=False):
         
         if self.model is None:
-            self.build_and_predict()
+            self.build()
+            
+        self.predict()
             
         if cutoff is not None:
             self.df_train = self.define_buys(self.df_train, cutoff, self.time_var, self.price_var)

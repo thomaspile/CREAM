@@ -10,12 +10,16 @@ from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.calibration import CalibratedClassifierCV, CalibrationDisplay
+from sklearn.isotonic import IsotonicRegression
+from sklearn.base import BaseEstimator, TransformerMixin
 # from sklearn.utils.testing import ignore_warnings
 # from sklearn.exceptions import ConvergenceWarning
 from xgboost.sklearn import XGBClassifier, XGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
+from catboost import CatBoostClassifier, CatBoostRegressor
 # import lightgbm as lgb
-from sklearn.metrics import classification_report, roc_auc_score, mean_squared_error, explained_variance_score, r2_score
+from sklearn.metrics import classification_report, roc_auc_score, mean_squared_error, explained_variance_score, r2_score, log_loss
 from sklearn import metrics
 import random
 from time import time
@@ -128,7 +132,81 @@ class ModelBuilder:
             
         return model, importance, metrics
 
-    def build_xgb(self, X_train, y_train, X_test, y_test, X_valid, y_valid, params, n_jobs=1, seed=123, outcome_type='classification'):
+    def build_catboost(self, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, feats=None, params=None, n_jobs=-1, seed=123, outcome_type='classification', export_to=None):
+
+        random.seed(seed)
+        if params is None:
+            params = {}
+        
+        if 'grow_policy' in params.keys():
+            if params['grow_policy'] != 'Lossguide':
+                if 'max_leaves' in params:
+                    print('Warning, dropping max_leaves parameter because grow_policy is not Lossguide')
+                    del params['max_leaves']
+                if 'num_leaves' in params:
+                    print('Warning, dropping num_leaves parameter because grow_policy is not Lossguide')
+                    del params['num_leaves']                
+                if 'min_data_in_leaf' in params:
+                    print('Warning, dropping min_data_in_leaf parameter because grow_policy is not Lossguide')
+                    del params['min_data_in_leaf']
+
+            if params['grow_policy'] != 'SymmetricTree':
+                if params['boosting_type'] == 'Ordered':
+                    print('Warning, setting boosting_type parameter to Plain because grow_policy is not SymmetricTree')
+                    params['boosting_type'] = 'Plain'
+
+            if params['grow_policy'] == 'Lossguide':
+                if params['sampling_frequency'] == 'PerTreeLevel':
+                    print('Warning, setting sampling_frequency parameter to PerTree because grow_policy = Lossguide')
+                    params['sampling_frequency'] = 'PerTree'
+        
+        if 'cutoff' in params.keys():
+            cutoff = params['cutoff']
+            del params['cutoff']
+        else:
+            cutoff = None
+        
+        if outcome_type == 'classification':
+            model = CatBoostClassifier(thread_count=n_jobs, verbose=False)
+        else:
+            model = CatBoostRegressor(thread_count=n_jobs, verbose=False)
+        model.set_params(**params)
+        
+        if feats is None:
+            feats = X_train.columns
+            
+        model.fit(X_train[feats], y_train)
+
+        if X_valid is None:
+            y_valid = None
+        elif X_valid.shape[0]==0:
+            X_valid = None
+            y_valid = None 
+
+        if outcome_type == 'classification':
+            metrics = self.evaluate_classifier(model, X_train[feats], y_train, X_test[feats], y_test, X_valid, y_valid,
+                                               cutoff=cutoff, ret=True)
+            label_with = 'test_auc'
+        else:
+            metrics = self.evaluate_regressor(model, X_train[feats], y_train, X_test[feats], y_test, X_valid, y_valid, ret=True)
+            label_with = 'test_rsquared'
+
+        importance = self.feature_importances(model, X_train[feats].columns, model_type='rf')
+        
+        if export_to is not None:
+            if export_to.endswith('/'):
+                folder_extension = f'{y_train.name}/'
+            else:
+                folder_extension = f'/{y_train.name}/'
+                
+            self.export_model_objects(export_to + folder_extension, model, X_train[feats], y_train, 
+                                      X_test[feats], y_test, params, metrics, importance,
+                                      label_with=label_with)
+            
+        return model, importance, metrics
+    
+    def build_xgb(self, X_train, y_train, X_test, y_test, X_valid, y_valid, params, n_jobs=1, seed=123,
+                  outcome_type='classification'):
 
         random.seed(seed)
         if params is None:
@@ -172,7 +250,7 @@ class ModelBuilder:
             importance = None
             
         return model, importance, errors
-      
+
     def build_lgb_spark(self):
         
         random.seed(seed)
@@ -444,9 +522,12 @@ class ModelBuilder:
         auc = roc_auc_score(y_hat, y_pred)
         precision, recall, _ = metrics.precision_recall_curve(y_hat, y_pred)
         auc_pr = metrics.auc(recall, precision)
+        
+        log_loss = metrics.log_loss(y_hat, y_pred)
 
         print(f'{dset} AUC: ' + str(auc))
         print(f'{dset} AUC_PR: ' + str(auc_pr))
+        print(f'{dset} Log Loss: ' + str(log_loss))
 
         if cutoff is not None:
             df_preds = pd.DataFrame({'actuals':y_hat, 'pred':y_pred})
@@ -463,7 +544,7 @@ class ModelBuilder:
         else:
             accuracy, precision = None, None
 
-        return {'auc':auc, 'auc_pr':auc_pr, 'accuracy':accuracy, 'precision':precision}
+        return {'auc':auc, 'auc_pr':auc_pr, 'log_loss':log_loss, 'accuracy':accuracy, 'precision':precision}
     
     def evaluate_classifier(self, model, X_train, y_train, X_test, y_test, X_valid=None, y_valid=None, cutoff=None, ret=False):
         
@@ -713,7 +794,7 @@ class ModelBuilder:
 
 class OptimalModel:
 
-    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, stratify_kfold=False):
+    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, stratify_kfold=False, export_to=None):
         
         self.df_train = None
         self.df_test = None
@@ -743,6 +824,7 @@ class OptimalModel:
         self.eval_metric = eval_metric
         self.k = k
         self.stratify_kfold = stratify_kfold
+        self.export_to = export_to
 
         if self.df_valid is None:
             self.df_valid = pd.DataFrame().reindex_like(self.df_train).dropna()
@@ -758,15 +840,32 @@ class OptimalModel:
                 if self.outcome_var is None:
                     raise ValueError('outcome_var must be supplied in either the search space or as a class parameter')
                 print('Performing model optimisation')
-
+    
+    def export(self, location, label_with='cv_scores'):
+        
+        if label_with == 'cv_scores':
+            label = '/cv_' + str(np.mean(self.cv_scores))
+        
+        files = [self.model, self.X_train, self.y_train, self.X_test, self.y_test, self.model_params, self.metrics, self.importance]
+        labels = ['model', 'X_train', 'y_train', 'X_test', 'y_test', 'params', 'metrics', 'importance']
+        
+        folder = location.rstrip('/') + '/' + self.outcome_var + '/' + self.model_type + str(label)
+        
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+        
+        for object_, label in zip(files, labels):
+            with open(folder + '/' + label + '.pkl', 'wb') as file:
+                pickle.dump(object_, file)
+                
     def build_optimal_model(self):
             
         bayes_trials = Trials()
         
         t0 = time()
         
-        if self.model_type not in ['lgb', 'xgboost', 'rf', 'dnn', 'lasso', 'ridge', 'elasticnet', 'pls', 'logistic', 'ridge_classifier']:
-            raise ValueError('model_type must be one of "lgb", "rf", "xgboost", "dnn", "lasso", "ridge", "elasticnet", "pls", "logistic" or "ridge_classifier"')
+        if self.model_type not in ['lgb', 'xgboost', 'catboost', 'rf', 'dnn', 'lasso', 'ridge', 'elasticnet', 'pls', 'logistic', 'ridge_classifier']:
+            raise ValueError('model_type must be one of "lgb", "rf", "xgboost", "catboost", "dnn", "lasso", "ridge", "elasticnet", "pls", "logistic" or "ridge_classifier"')
         if self.model_type not in ['lgb', 'xgboost'] and self.how_to_tune == 'early_stopping':
             raise ValueError('model_type must be one of "lgb", "xgboost" if how_to_tune == "early_stopping"')
         if self.opt_lib not in ['opt', 'hp', 'ga']:
@@ -780,6 +879,9 @@ class OptimalModel:
             elif self.model_type == 'xgboost':
                 space = space_xgboost.copy()
                 objective_fn = self.objective_xgboost_hp
+            elif self.model_type == 'catboost':
+                space = space_catboost.copy()
+                objective_fn = self.objective_catboost_hp                
             elif self.model_type == 'rf':
                 space = space_rf.copy()
                 objective_fn = self.objective_rf_hp
@@ -814,8 +916,8 @@ class OptimalModel:
             best = fmin(fn=objective_fn, space=space, algo=self.hp_algo, max_evals=self.evals, trials=bayes_trials)
             
             params = pd.DataFrame(sorted(bayes_trials.results, key = lambda x: x['loss'])).params[0]    
-            cv_scores = pd.DataFrame(sorted(bayes_trials.results, key = lambda x: x['loss'])).cv_scores[0]
-            trials = bayes_trials
+            self.cv_scores = pd.DataFrame(sorted(bayes_trials.results, key = lambda x: x['loss'])).cv_scores[0]
+            self.trials = bayes_trials
             
         elif self.opt_lib == 'opt':
             study = optuna.create_study()
@@ -907,10 +1009,10 @@ class OptimalModel:
         if self.df_valid is not None:
             self.y_valid = self.df_valid[outcome_var]
         
-        model_params = copy.deepcopy(params)
+        self.model_params = copy.deepcopy(params)
         
-        if 'outcome_var' in model_params.keys():
-            del model_params['outcome_var']
+        if 'outcome_var' in self.model_params.keys():
+            del self.model_params['outcome_var']
         # if 'cutoff' in model_params.keys():
         #     del model_params['cutoff']
                 
@@ -918,68 +1020,75 @@ class OptimalModel:
         
         try:
             if self.model_type == 'lgb':
-                model, importance, errors = builder.build_lgb(self.X_train[self.cols], self.y_train, 
+                self.model, self.importance, self.metrics = builder.build_lgb(self.X_train[self.cols], self.y_train, 
                                                               self.X_test[self.cols], self.y_test, 
                                                               self.X_valid[self.cols], self.y_valid, 
-                                                              model_params, outcome_type=self.outcome_type, 
+                                                              self.model_params, outcome_type=self.outcome_type, 
                                                               n_jobs=self.n_jobs, seed=self.seed)
             elif self.model_type == 'xgboost':
-                model, importance, errors = builder.build_xgboost(self.X_train[self.cols], self.y_train,
+                self.model, self.importance, self.metrics = builder.build_xgboost(self.X_train[self.cols], self.y_train,
                                                                   self.X_test[self.cols], self.y_test, 
                                                                   self.X_valid[self.cols], self.y_valid, 
-                                                                  model_params, outcome_type=self.outcome_type, 
+                                                                  self.model_params, outcome_type=self.outcome_type, 
                                                                   n_jobs=self.n_jobs, seed=self.seed)
-            elif self.model_type == 'rf':
-                model, importance, errors = builder.build_rf(self.X_train, self.y_train, 
+            elif self.model_type == 'catboost':
+                self.model, self.importance, self.metrics = builder.build_catboost(self.X_train, self.y_train, 
                                                              self.X_test, self.y_test, 
                                                              self.X_valid, self.y_valid, 
-                                                             params=model_params, feats=self.cols,
+                                                             params=self.model_params, feats=self.cols,
+                                                             outcome_type=self.outcome_type, 
+                                                             n_jobs=self.n_jobs, seed=self.seed)               
+            elif self.model_type == 'rf':
+                self.model, self.importance, self.metrics = builder.build_rf(self.X_train, self.y_train, 
+                                                             self.X_test, self.y_test, 
+                                                             self.X_valid, self.y_valid, 
+                                                             params=self.model_params, feats=self.cols,
                                                              outcome_type=self.outcome_type, 
                                                              n_jobs=self.n_jobs, seed=self.seed)
             elif self.model_type == 'dnn':
                 model, errors = builder.build_dnn(X_train[cols], y_train, X_test[cols], y_test, X_valid[cols], y_valid, model_params)
                 importance = pd.DataFrame()
             elif self.model_type == 'lasso':
-                model, importance, errors = builder.build_lasso(self.X_train[self.cols], self.y_train, 
+                self.model, self.importance, self.metrics = builder.build_lasso(self.X_train[self.cols], self.y_train, 
                                                                 self.X_test[self.cols], self.y_test, 
-                                                                self.X_valid[self.cols], self.y_valid, model_params)
+                                                                self.X_valid[self.cols], self.y_valid, self.model_params)
             elif self.model_type == 'ridge':
-                model, importance, errors = builder.build_ridge(self.X_train[self.cols], self.y_train, 
+                self.model, self.importance, self.metrics = builder.build_ridge(self.X_train[self.cols], self.y_train, 
                                                                 self.X_test[self.cols], self.y_test, 
-                                                                self.X_valid[self.cols], self.y_valid, model_params)               
+                                                                self.X_valid[self.cols], self.y_valid, self.model_params)               
             elif self.model_type == 'elasticnet':
-                model, importance, errors = builder.build_elasticnet(self.X_train[self.cols], self.y_train, 
+                self.model, self.importance, self.metrics = builder.build_elasticnet(self.X_train[self.cols], self.y_train, 
                                                                      self.X_test[self.cols], self.y_test, 
-                                                                     self.X_valid[self.cols], self.y_valid, model_params)
+                                                                     self.X_valid[self.cols], self.y_valid, self.model_params)
             elif self.model_type == 'pls':
-                model, importance, errors = builder.build_pls(self.X_train[self.cols], self.y_train, 
+                self.model, self.importance, self.metrics = builder.build_pls(self.X_train[self.cols], self.y_train, 
                                                               self.X_test[self.cols], self.y_test, 
-                                                              self.X_valid[self.cols], self.y_valid, model_params)
+                                                              self.X_valid[self.cols], self.y_valid, self.model_params)
             elif self.model_type == 'logistic':
-                model, importance, errors = builder.build_logistic(self.X_train[self.cols], self.y_train, 
+                self.model, self.importance, self.metrics = builder.build_logistic(self.X_train[self.cols], self.y_train, 
                                                                      self.X_test[self.cols], self.y_test, 
-                                                                     self.X_valid[self.cols], self.y_valid, model_params)  
+                                                                     self.X_valid[self.cols], self.y_valid, self.model_params)  
             elif self.model_type == 'ridge_classifier':
-                model, importance, errors = builder.build_ridge_classifier(self.X_train[self.cols], self.y_train, 
+                self.model, self.importance, self.metrics = builder.build_ridge_classifier(self.X_train[self.cols], self.y_train, 
                                                                            self.X_test[self.cols], self.y_test, 
                                                                            self.X_valid[self.cols], self.y_valid,
-                                                                           model_params) 
+                                                                           self.model_params) 
                 
         except Exception as e:
             print(f'Failed to build best model after hp optimisation. Error: {e}')
             print(f'The best params were:')
             print(params)
           
-            model = []
-            importance = pd.DataFrame()
-            errors = {}
+            self.model = []
+            self.importance = pd.DataFrame()
+            self.metrics = {}
                 
-        if cv_scores is not None:
-            print(f'Cross validation scores: {cv_scores}')
+        if self.cv_scores is not None:
+            print(f'Cross validation scores: {self.cv_scores}')
             
         print(f'params = {params}')
         
-        return model, params, trials, importance, errors, cv_scores
+        return self.model, params, self.trials, self.importance, self.metrics, self.cv_scores
     
     def train_and_evaluate(self, model, X_train, y_train, X_test, y_test, how_to_tune, outcome_type, eval_metric='rmse', k=5, stratify_kfold=False):
         
@@ -1011,8 +1120,16 @@ class OptimalModel:
                     precision, recall, _ = metrics.precision_recall_curve(y, y_hat)
                     auc_pr = metrics.auc(recall, precision)
                     return - auc_pr   
+            elif eval_metric == 'log_loss':
+                def cv_scoring(estimator, X, y):
+                    y_hat = estimator.predict_proba(X)[:, 1]  
+                    log_loss = metrics.log_loss(y, y_hat)
+                    return log_loss   
+                def eval_func(y, y_hat):
+                    log_loss = metrics.log_loss(y, y_hat)
+                    return log_loss  
             else:
-                raise ValueError('eval_metric must be supplied as a callable function or one of "auc" and "auc_pr"')
+                raise ValueError('eval_metric must be supplied as a callable function or one of "auc", "auc_pr", "log_loss"')
         else:
             def pred_func(X, model):
                 return model.predict(X) 
@@ -1029,27 +1146,34 @@ class OptimalModel:
                     return model.predict(X)
                 eval_func = wape
             elif eval_metric in ['r2', 'r_squared']:
-                def cv_scoring(estimator, X, y):
-                    y_pred = estimator.predict(X)
-                    return - r2_score(y, y_pred)
+                # def cv_scoring(estimator, X, y):
+                #     y_pred = estimator.predict(X)
+                #     return - r2_score(y, y_pred)
+                cv_scoring = 'r2'
                 def eval_func(y, y_pred):
                     return - r2_score(y, y_pred)  
                 def cross_val_loss_func(scores):
-                    return np.mean(scores)
-            else:
-                cv_scoring = "neg_mean_squared_error"
+                    return - np.mean(scores)
+            elif eval_metric in ['rmse', "neg_root_mean_squared_error"]:
+                cv_scoring = "neg_root_mean_squared_error"
                 def cross_val_loss_func(scores):
-                    if self.debug:
-                        print(scores)
-                    rsmes = np.array([np.sqrt(-x) for x in scores])
-                    if self.debug:
-                        print(rsmes)
-                    loss = np.mean(rsmes)
+                    rmses = np.array([np.sqrt(-x) for x in scores])
+                    loss = np.mean(rmses)
                     return loss
                 def pred_func(X, model):
                     return model.predict(X)
                 def eval_func(y, y_hat):
                     return np.sqrt(mean_squared_error(y, y_hat))
+            else:
+                cv_scoring = "neg_mean_absolute_error"
+                def cross_val_loss_func(scores):
+                    negative_scores = np.array([-x for x in scores])
+                    loss = np.mean(negative_scores)
+                    return loss
+                def pred_func(X, model):
+                    return model.predict(X)
+                def eval_func(y, y_hat):
+                    return np.sqrt(mean_squared_error(y, y_hat))                
 
         random.seed(self.seed)
         scores = None
@@ -1065,6 +1189,38 @@ class OptimalModel:
                 cv = KFold(n_splits=k, shuffle=False) 
             scores = cross_val_score(model, X_train, y_train, cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
             loss = cross_val_loss_func(scores)
+            
+#         elif how_to_tune == 'cross_val_calibrated':
+#             self.debug_out('hp tuning with cross validation and score calibration on trainset', self.debug)
+#             if outcome_type == 'classification':
+#                 if stratify_kfold:
+#                     cv = StratifiedKFold(n_splits=k)
+#                 else:
+#                     cv = KFold(n_splits=k, shuffle=False)
+#             else:
+#                 cv = KFold(n_splits=k, shuffle=False) 
+            
+#             classifier = CalibratedClassifierCV(model, cv=cv, n_jobs=1, ensemble=False)
+#             scores = cross_val_score(classifier, X_train, y_train, cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
+#             loss = cross_val_loss_func(scores)
+            
+#         elif how_to_tune == 'cross_val_calibrated_pipe':
+#             self.debug_out('hp tuning with cross validation and score calibration on trainset', self.debug)
+#             if outcome_type == 'classification':
+#                 if stratify_kfold:
+#                     cv = StratifiedKFold(n_splits=k)
+#                 else:
+#                     cv = KFold(n_splits=k, shuffle=False)
+#             else:
+#                 cv = KFold(n_splits=k, shuffle=False) 
+            
+#             pipeline = Pipeline([
+#                 ('model', model),
+#                 ('calibration', IsotonicCalibrator())
+#             ])
+
+#             scores = cross_val_score(pipeline, X_train, y_train, cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
+#             loss = cross_val_loss_func(scores)        
             
         elif how_to_tune == 'cross_val_standardised':
             
@@ -1466,7 +1622,66 @@ class OptimalModel:
                                                   self.stratify_kfold)
 
         return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
-      
+
+    def objective_catboost_hp(self, params):
+
+        """Objective function for CatBoost Hyperparameter Tuning"""
+        
+        random.seed(self.seed)    
+        
+        if params['grow_policy'] != 'Lossguide':
+            if 'max_leaves' in params:
+                del params['max_leaves']
+            if 'num_leaves' in params:
+                del params['num_leaves']                
+            if 'min_data_in_leaf' in params:
+                del params['min_data_in_leaf']
+    
+        if params['grow_policy'] != 'SymmetricTree':
+            params['boosting_type'] = 'Plain'
+            
+        if params['grow_policy'] == 'Lossguide':
+            params['sampling_frequency'] = 'PerTree'
+        
+        if self.outcome_type == 'regression':
+            model = CatBoostRegressor(thread_count=self.n_jobs, verbose=False)
+        else:
+            model = CatBoostClassifier(thread_count=self.n_jobs, verbose=False)
+        
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+            
+        model.set_params(**model_params)
+        
+        self.debug_out('hp rf train and evaluate', self.debug)
+        loss, cv_scores = self.train_and_evaluate(model, 
+                                                  X_train, 
+                                                  y_train, 
+                                                  X_test, 
+                                                  y_test, 
+                                                  self.how_to_tune, 
+                                                  self.outcome_type,
+                                                  evaluation,
+                                                  self.k,
+                                                  self.stratify_kfold)
+            
+        # try:
+        #     self.debug_out('hp rf train and evaluate', self.debug)
+        #     loss, cv_scores = self.train_and_evaluate(model, 
+        #                                               X_train, 
+        #                                               y_train, 
+        #                                               X_test, 
+        #                                               y_test, 
+        #                                               self.how_to_tune, 
+        #                                               self.outcome_type,
+        #                                               evaluation,
+        #                                               self.k,
+        #                                               self.stratify_kfold)
+        # except:
+        #     loss = 9999999
+        #     cv_scores = self.k * [9999999]
+
+        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
+    
     def debug_out(self, step, debug, simple=False):
         if debug:
             if simple:
@@ -1582,6 +1797,37 @@ class ShapleyPlots:
         else:
             shap.force_plot(self.explainer.expected_value[self.class_idx], shap_values, df[self.features], 
                             contribution_threshold=contribution_threshold, matplotlib=matplotlib)  
+
+
+
+class IsotonicCalibrator(BaseEstimator, TransformerMixin):
+    def __init__(self):
+        self.calibrator = None  # Placeholder for isotonic regressor
+   
+    def fit(self, X, y):
+        # Fit isotonic regression on the model's predicted probabilities and true labels
+        self.calibrator = IsotonicRegression(out_of_bounds='clip')
+        self.calibrator.fit(X, y)
+        return self
+   
+    def transform(self, X):
+        # Apply the fitted isotonic calibration
+        return self.calibrator.transform(X)
+
+    
+class PlattCalibrator(BaseEstimator, TransformerMixin):
+    def __init__(self):
+        self.calibrator = None  # Placeholder for logistic regressor
+   
+    def fit(self, X, y):
+        # Fit logistic regression on the predicted probabilities
+        self.calibrator = LogisticRegression()
+        self.calibrator.fit(X, y)
+        return self
+   
+    def transform(self, X):
+        # Apply logistic regression to calibrate the predicted probabilities
+        return self.calibrator.predict_proba(X)[:, 1]
 
             
 class ModelPlots:
@@ -1913,6 +2159,18 @@ space_lgb = {
 #     'subsample_for_bin': hp.quniform('subsample_for_bin', 20000, 300000, 20000),
 #    'min_data_in_leaf': hp.quniform('min_child_samples', 10, 500, 5),
     #,'colsample_bytree': hp.uniform('colsample_bytree', 0.6, 1.0)
+}
+
+space_catboost = {
+    'iterations': pyll.scope.int(hp.quniform('iterations', 50, 750, 100)),
+    'learning_rate': hp.loguniform('learning_rate', np.log(0.01), np.log(0.5)),
+    'subsample': hp.uniform('subsample', 0.1, 1.0),
+    'sampling_frequency': pyll.scope.int(hp.uniform('sampling_frequency', 1, 40)),
+    'reg_lambda': hp.choice('reg_lambda', [0, 0.001, 0.01, 0.1, 0.2]),
+    'max_depth': pyll.scope.int(hp.quniform('max_depth', 6, 20, 2)),
+    'num_leaves': pyll.scope.int(hp.quniform('num_leaves', 2, 150, 1)),
+    'min_child_samples': pyll.scope.int(hp.choice('min_child_samples', [5, 10, 100, 500, 1000, 5000])),
+    'boosting_type': hp.choice('boosting_type', ['Ordered', 'Plain']),
 }
 
 space_rf = {
