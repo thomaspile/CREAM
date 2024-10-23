@@ -794,7 +794,7 @@ class ModelBuilder:
 
 class OptimalModel:
 
-    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, stratify_kfold=False, export_to=None):
+    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, evaluation_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, stratify_kfold=False, export_to=None):
         
         self.df_train = None
         self.df_test = None
@@ -812,6 +812,7 @@ class OptimalModel:
         self.opt_lib = opt_lib
         self.outcome_var = outcome_var
         self.search_space = search_space
+        self.evaluation_space = evaluation_space
         self.how_to_tune = how_to_tune
         self.n_jobs = n_jobs
         self.seed = seed
@@ -911,11 +912,16 @@ class OptimalModel:
                 
             if self.search_space is not None:
                 space = self.search_space.copy()
+                
+            if self.evaluation_space is not None:
+                space.update(self.evaluation_space)
+                space['evaluation_params'] = list(self.evaluation_space.keys())
             
             self.debug_out(f'hp {self.model_type}', self.debug)  
             best = fmin(fn=objective_fn, space=space, algo=self.hp_algo, max_evals=self.evals, trials=bayes_trials)
             
             params = pd.DataFrame(sorted(bayes_trials.results, key = lambda x: x['loss'])).params[0]    
+            evaluation_params = pd.DataFrame(sorted(bayes_trials.results, key = lambda x: x['loss'])).evaluation_params[0]   
             self.cv_scores = pd.DataFrame(sorted(bayes_trials.results, key = lambda x: x['loss'])).cv_scores[0]
             self.trials = bayes_trials
             
@@ -1087,6 +1093,12 @@ class OptimalModel:
             print(f'Cross validation scores: {self.cv_scores}')
             
         print(f'params = {params}')
+        if len(evaluation_params) > 0:
+            if 'df_train' in evaluation_params.keys():
+                del evaluation_params['df_train']
+            if 'df_prices' in evaluation_params.keys():
+                del evaluation_params['df_prices']                
+            print(f'evaluation_params = {evaluation_params}')
         
         return self.model, params, self.trials, self.importance, self.metrics, self.cv_scores
     
@@ -1284,10 +1296,19 @@ class OptimalModel:
     
     def handle_parameters(self, params):
         
-        if 'cutoff' in params.keys() and callable(self.eval_metric):
-            evaluation = partial(self.eval_metric, cutoff=params['cutoff'])
+        # if 'cutoff' in params.keys() and callable(self.eval_metric):
+        #     evaluation = partial(self.eval_metric, cutoff=params['cutoff'])
+            
+        if 'evaluation_params' in params.keys() and callable(self.eval_metric):
+            evaluation_params = {key: params[key] for key in params['evaluation_params']}
+            evaluation = partial(self.eval_metric, **evaluation_params)
+            
+            del params['evaluation_params']
+            for key in evaluation_params.keys():
+                del params[key]
         else:
             evaluation = self.eval_metric
+            evaluation_params = {}
             
         if 'outcome_var' in params.keys():
             outcome_var = params['outcome_var']
@@ -1306,7 +1327,7 @@ class OptimalModel:
         if 'cutoff' in model_params.keys():
             del model_params['cutoff']
             
-        return X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params
+        return X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params
             
     def objective_lgb_hp(self, params):
 
@@ -1329,7 +1350,7 @@ class OptimalModel:
         else:
             model = LGBMRegressor(n_jobs=self.n_jobs, verbosity=-100)
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
@@ -1345,7 +1366,7 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
 
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
     
     def objective_lgb_hp_old(self, params):
 
@@ -1393,7 +1414,7 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
 
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
       
     def objective_lasso_hp(self, params_in):
 
@@ -1405,7 +1426,7 @@ class OptimalModel:
         
         model = Lasso()
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
@@ -1421,7 +1442,7 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
             
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
 
     def objective_ridge_hp(self, params_in):
 
@@ -1433,7 +1454,7 @@ class OptimalModel:
         
         model = Ridge()
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
@@ -1449,7 +1470,7 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
             
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
     
     def objective_ridge_classifier_hp(self, params_in):
 
@@ -1461,7 +1482,7 @@ class OptimalModel:
         
         model = RidgeClassifier()
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
@@ -1477,7 +1498,7 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
             
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
     
     def objective_elasticnet_hp(self, params_in):
 
@@ -1489,7 +1510,7 @@ class OptimalModel:
         
         model = ElasticNet()
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
@@ -1505,7 +1526,7 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
             
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}    
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
 
     def objective_pls_hp(self, params_in):
 
@@ -1517,7 +1538,7 @@ class OptimalModel:
         
         model = PLSRegression()
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
@@ -1533,7 +1554,7 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
             
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}   
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
     
     def objective_logistic_regularised_hp(self, params_in):
         
@@ -1543,7 +1564,7 @@ class OptimalModel:
         
         params = params_in.copy()
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
         
         model = LogisticRegression()
         model.set_params(**model_params)
@@ -1560,7 +1581,7 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
             
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}      
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
 
     def objective_xgboost_hp(self, params_in):
 
@@ -1592,7 +1613,7 @@ class OptimalModel:
                                                   self.k,
                                                   self.stratify_kfold)
             
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
         
     def objective_rf_hp(self, params):
 
@@ -1605,7 +1626,7 @@ class OptimalModel:
         else:
             model = RandomForestClassifier(n_jobs=self.n_jobs)
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
@@ -1620,8 +1641,8 @@ class OptimalModel:
                                                   evaluation,
                                                   self.k,
                                                   self.stratify_kfold)
-
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
+        
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
 
     def objective_catboost_hp(self, params):
 
@@ -1648,7 +1669,7 @@ class OptimalModel:
         else:
             model = CatBoostClassifier(thread_count=self.n_jobs, verbose=False)
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params = self.handle_parameters(params)
+        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
         
@@ -1680,7 +1701,7 @@ class OptimalModel:
         #     loss = 9999999
         #     cv_scores = self.k * [9999999]
 
-        return {'loss': loss, 'params': params, 'status': STATUS_OK, 'cv_scores':cv_scores}
+        return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
     
     def debug_out(self, step, debug, simple=False):
         if debug:
