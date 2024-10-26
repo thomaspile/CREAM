@@ -1297,9 +1297,9 @@ class ModelValidation:
                 shapley.plot_importance(n_features=n_features, feature_dict=self.feature_dictionary, figsize=figsize,
                                         fontsize=fontsize)
                 
-            ModelPlots.target_interactions(self.df_train, self.df_feature_importance.loc[0:n_features - 1, 'feature'],
-                                           self.target, idvar='date', feature_dict=self.feature_dictionary,
-                                           bounds_dictionary=self.bounds_dictionary, ylim=ylim)
+            ModelPlots.target_interactions_train_test_comp(self.df_train, self.df_test, self.df_feature_importance.loc[0:n_features - 1, 'feature'],
+                                                   self.target, idvar='date', feature_dict=self.feature_dictionary,
+                                                   bounds_dictionary=self.bounds_dictionary, ylim=ylim)
 
             self.plot_ave(id_var=self.id_var, qcut=False, n_cuts=5)
             self.plot_cumulative_response_binary()

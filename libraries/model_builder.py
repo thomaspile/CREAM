@@ -33,6 +33,7 @@ import shap
 import math
 from functools import partial
 import pickle
+from scipy import stats
 
 # from sklearn.utils.testing import ignore_warnings
 from warnings import simplefilter
@@ -794,7 +795,7 @@ class ModelBuilder:
 
 class OptimalModel:
 
-    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, evaluation_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, stratify_kfold=False, export_to=None):
+    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, evaluation_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, stratify_kfold=False, cross_val_agg='mean', export_to=None):
         
         self.df_train = None
         self.df_test = None
@@ -825,6 +826,7 @@ class OptimalModel:
         self.eval_metric = eval_metric
         self.k = k
         self.stratify_kfold = stratify_kfold
+        self.cross_val_agg = cross_val_agg
         self.export_to = export_to
 
         if self.df_valid is None:
@@ -850,7 +852,7 @@ class OptimalModel:
         files = [self.model, self.X_train, self.y_train, self.X_test, self.y_test, self.model_params, self.metrics, self.importance]
         labels = ['model', 'X_train', 'y_train', 'X_test', 'y_test', 'params', 'metrics', 'importance']
         
-        folder = location.rstrip('/') + '/' + self.outcome_var + '/' + self.model_type + str(label)
+        folder = location.rstrip('/') + '/' + self.y_train.name + '/' + self.model_type + str(label)
         
         if not os.path.isdir(folder):
             os.makedirs(folder)
@@ -1102,15 +1104,20 @@ class OptimalModel:
         
         return self.model, params, self.trials, self.importance, self.metrics, self.cv_scores
     
-    def train_and_evaluate(self, model, X_train, y_train, X_test, y_test, how_to_tune, outcome_type, eval_metric='rmse', k=5, stratify_kfold=False):
+    def train_and_evaluate(self, model, X_train, y_train, X_test, y_test, how_to_tune, outcome_type, eval_metric='rmse', k=5, stratify_kfold=False, cross_val_agg='mean'):
         
         simplefilter(action="ignore", category=ConvergenceWarning)
+        
+        if cross_val_agg == 'hmean':
+            cross_val_mean_func = stats.hmean
+        else:
+            cross_val_mean_func = np.mean
         
         if outcome_type == 'classification':
             def pred_func(X, model):
                 return model.predict_proba(X)[:, 1]   
             def cross_val_loss_func(scores):
-                return np.mean(scores) 
+                return cross_val_mean_func(scores) 
             
             if callable(eval_metric):
                 cv_scoring = eval_metric
@@ -1118,7 +1125,7 @@ class OptimalModel:
             elif eval_metric == 'auc':
                 cv_scoring = 'roc_auc'    
                 def cross_val_loss_func(scores):
-                    return - np.mean(scores) 
+                    return - cross_val_mean_func(scores) 
                 def eval_func(y, y_hat):
                     return - roc_auc_score(y, y_hat)     
             elif eval_metric == 'auc_pr':
@@ -1153,7 +1160,7 @@ class OptimalModel:
                     y_pred = estimator.predict(X)
                     return wape(y, y_pred)
                 def cross_val_loss_func(scores):
-                    return np.mean(scores)
+                    return cross_val_mean_func(scores)
                 def pred_func(X, model):
                     return model.predict(X)
                 eval_func = wape
@@ -1165,12 +1172,12 @@ class OptimalModel:
                 def eval_func(y, y_pred):
                     return - r2_score(y, y_pred)  
                 def cross_val_loss_func(scores):
-                    return - np.mean(scores)
+                    return - cross_val_mean_func(scores)
             elif eval_metric in ['rmse', "neg_root_mean_squared_error"]:
                 cv_scoring = "neg_root_mean_squared_error"
                 def cross_val_loss_func(scores):
                     rmses = np.array([np.sqrt(-x) for x in scores])
-                    loss = np.mean(rmses)
+                    loss = cross_val_mean_func(rmses)
                     return loss
                 def pred_func(X, model):
                     return model.predict(X)
@@ -1364,7 +1371,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
 
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
     
@@ -1412,7 +1420,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   self.eval_metric,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
 
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
       
@@ -1440,7 +1449,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
             
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
 
@@ -1468,7 +1478,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
             
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
     
@@ -1496,7 +1507,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
             
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
     
@@ -1524,7 +1536,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
             
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
 
@@ -1552,7 +1565,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
             
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
     
@@ -1579,7 +1593,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
             
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
 
@@ -1611,7 +1626,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   self.eval_metric,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
             
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
         
@@ -1640,7 +1656,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
         
         return {'loss': loss, 'params': params, 'evaluation_params': evaluation_params, 'status': STATUS_OK, 'cv_scores':cv_scores}
 
@@ -1683,7 +1700,8 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
-                                                  self.stratify_kfold)
+                                                  self.stratify_kfold,
+                                                  self.cross_val_agg)
             
         # try:
         #     self.debug_out('hp rf train and evaluate', self.debug)
@@ -1944,6 +1962,40 @@ class ModelPlots:
             GenPlots.plot_interactions(df, feats[1], feats_strings[1], target, boundaries=boundaries, idvar=idvar,
                                        remove_outliers=False, n_cuts=5, fontsize=fontsize,
                                        title=f'{feats_strings[1]} \n vs {target_formatted} Rate', 
+                                       ylabel=f'{target_formatted} Rate', ax=axs[1], ylim=ylim)
+            
+    def target_interactions_train_test_comp(df_train, df_test, features, target, idvar='individualid', bounds_dictionary=None, feature_dict=None, figsize=(33, 10), fontsize=18, ylim=[0, 1]):
+        
+        target_formatted = GenUtilities.capitalise_strings(target)
+        
+        if feature_dict is not None:
+          
+            def get_feature_label(feature, feature_dict):
+                
+                if feature in feature_dict.keys(): 
+                    return feature_dict[feature]
+                else:
+                    return feature
+                
+            features_formatted = [get_feature_label(feat, feature_dict) for feat in features]
+        else:
+            features_formatted = features
+       
+        for feat, feat_string in zip(features, features_formatted):
+            _, axs = plt.subplots(1, 2, figsize=figsize)
+            if bounds_dictionary is not None:
+                boundaries = bounds_dictionary.get(feat)
+            else:
+                boundaries = None
+                
+            GenPlots.plot_interactions(df_train, feat, feat_string, target, boundaries=boundaries, idvar=idvar,
+                                       remove_outliers=False, n_cuts=5, fontsize=fontsize,
+                                       title=f'Train Set, {feat_string} \n vs {target_formatted} Rate', 
+                                       ylabel=f'{target_formatted} Rate', ax=axs[0], ylim=ylim)
+     
+            GenPlots.plot_interactions(df_test, feat, feat_string, target, boundaries=boundaries, idvar=idvar,
+                                       remove_outliers=False, n_cuts=5, fontsize=fontsize,
+                                       title=f'Test Set, {feat_string} \n vs {target_formatted} Rate', 
                                        ylabel=f'{target_formatted} Rate', ax=axs[1], ylim=ylim)
             
     def ave_reg(df_predictions, outcome, predicted, n_cuts=10, ax=None, df_label=None):

@@ -20,6 +20,107 @@ import copy
 from model_builder import OptimalModel, ModelBuilder, ModelPlots
 
 
+class MACD:
+    
+    def __init__(self, series, periods=None, fastp=12, slowp=26, sigp=9):
+        
+        self.series = series.copy().reset_index(drop=True)
+        try:
+            self.series_name = series.__dict__['_cacher'][0]
+        except:
+            self.series_name = None
+            
+        self.periods = periods
+
+        self.macd, self.macd_signal, self.macdHist = talib.MACD(self.series, fastperiod=fastp, 
+                                                                slowperiod=slowp, signalperiod=sigp)
+        
+        self.scale_to_series()
+        self.get_crossovers()
+        self.get_divergence()
+        self.get_divergence_features()
+    
+    def scale_to_series(self):
+        
+        '''Only used if you want to plot the MACD line and signal on the series plot'''
+    
+        scaler = MinMaxScaler(feature_range=(min(self.series), max(self.series)))
+        
+        scaler.fit(np.array(self.macd).reshape(-1, 1))
+        self.macd_scaled = scaler.transform(np.array(self.macd).reshape(-1, 1))
+        self.macd_signal_scaled = scaler.transform(np.array(self.macd_signal).reshape(-1, 1))
+    
+    def get_crossovers(self):
+        
+        self.crossovers = ['None']
+        self.idxs_up = []
+        self.idxs_down = []
+
+        for i in range(1, len(self.macd_signal)):
+            if self.macd[i] > self.macd_signal[i] and self.macd[i - 1] <= self.macd_signal[i - 1]:
+                self.crossovers.append("Up")
+                self.idxs_up.append(i)
+            elif self.macd[i] < self.macd_signal[i] and self.macd[i - 1] >= self.macd_signal[i - 1]:
+                self.crossovers.append("Down")
+                self.idxs_down.append(i)
+            else:
+                self.crossovers.append('None')
+                
+        df_up_signals = pd.DataFrame({'crossover_idx':self.idxs_up, 'crossover_type':['up']*len(self.idxs_up)})
+        df_down_signals = pd.DataFrame({'crossover_idx':self.idxs_down, 'crossover_type':['down']*len(self.idxs_down)})
+        
+        self.df_macd_crossovers = pd.concat([df_up_signals, df_down_signals]).sort_values('crossover_idx', ascending=True)
+ 
+    def get_divergence(self):
+        
+        self.df_macd = pd.DataFrame({'macd':self.macd, 'macd_signal':self.macd_signal})
+        
+        if self.periods is not None:
+            self.df_macd['idx'] = self.periods
+        else:
+            self.df_macd = self.df_macd.reset_index().rename(columns={'index':'idx'})         
+        
+        self.df_macd['macd_signal_divergence'] = self.df_macd['macd'] - self.df_macd['macd_signal']        
+    
+    def get_divergence_features(self, n_back_checks=10, n_periods_gradient=4):
+        
+        for i in range(1, n_back_checks + 1):
+            self.df_macd[f'macd_signal_divergence_minus_{i}'] = self.df_macd['macd_signal_divergence'].shift(i) 
+        
+        self.df_macd[f'macd_signal_divergence_gradient_{n_periods_gradient}'] = (self.df_macd[f'macd_signal_divergence'] - self.df_macd[f'macd_signal_divergence_minus_{n_periods_gradient}']) / n_periods_gradient
+        self.df_macd[f'macd_signal_divergence_rolling_std_{n_back_checks}_delta'] = (self.df_macd['macd_signal_divergence'] / self.df_macd['macd_signal_divergence'].rolling(window=n_back_checks, closed='left').std()) - 1
+        
+        # self.df_macd[self.df_macd['idx'].isin(self.df_macd_crossovers['idx'].values
+        
+    def plot(self, figsize=(24, 20)):
+
+        _, axs = plt.subplots(2, 1, figsize=figsize)
+
+        ax = axs[0]
+        ax.plot(self.series, 'black')
+        
+        for idx in macd.idxs_up:
+            ax.axvline(idx, c='g')
+            ax.text(x=idx - 5, y=min(self.series) + 15, s='Upturn', fontsize=18)
+        for idx in macd.idxs_down:
+            ax.axvline(idx, c='r')
+            ax.text(x=idx - 5, y=min(self.series), s='Downturn', fontsize=18)
+
+        # ax.legend(['Price', 'Ascended', 'Double Ascended', 'Descended', 'Double Descended', 'Triple Descended'], prop={'size': 20})
+
+        ax.set_title('Macd', fontsize=26)
+        ax.set_xlabel('Index', fontsize=22)
+        ax.set_ylabel(self.series_name, fontsize=22);
+
+        ax.set_xticklabels([int(x) for x in ax.get_xticks()], fontsize=18)
+        ax.set_yticklabels([int(x) for x in ax.get_yticks()], fontsize=18);
+
+        ax = axs[1]
+        ax.plot(macd.df_macd['idx'], macd.df_macd['macd_signal_divergence'])
+        ax.plot(macd.df_macd['idx'], macd.df_macd['macd_signal_divergence_gradient_4'])
+        ax.axhline(0, c='r')            
+            
+
 class TimeSeriesFeatures:
         
     def build_rolling_features(df, var, roll_lengths=[1, 2, 3, 5, 7]):
