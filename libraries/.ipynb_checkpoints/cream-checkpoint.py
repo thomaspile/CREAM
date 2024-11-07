@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 import plotly.offline as py
 from matplotlib import pyplot as plt
 import copy
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 # sys.path.insert(0, 'libraries')
 from model_builder import OptimalModel, ModelBuilder, ModelPlots
@@ -22,7 +23,7 @@ from model_builder import OptimalModel, ModelBuilder, ModelPlots
 
 class MACD:
     
-    def __init__(self, series, periods=None, fastp=12, slowp=26, sigp=9):
+    def __init__(self, series, fastp=12, slowp=26, sigp=9, periods=None):
         
         self.series = series.copy().reset_index(drop=True)
         try:
@@ -35,7 +36,6 @@ class MACD:
         self.macd, self.macd_signal, self.macdHist = talib.MACD(self.series, fastperiod=fastp, 
                                                                 slowperiod=slowp, signalperiod=sigp)
         
-        self.scale_to_series()
         self.get_crossovers()
         self.get_divergence()
         self.get_divergence_features()
@@ -93,16 +93,18 @@ class MACD:
         # self.df_macd[self.df_macd['idx'].isin(self.df_macd_crossovers['idx'].values
         
     def plot(self, figsize=(24, 20)):
+        
+        self.scale_to_series()
 
         _, axs = plt.subplots(2, 1, figsize=figsize)
 
         ax = axs[0]
         ax.plot(self.series, 'black')
         
-        for idx in macd.idxs_up:
+        for idx in self.idxs_up:
             ax.axvline(idx, c='g')
             ax.text(x=idx - 5, y=min(self.series) + 15, s='Upturn', fontsize=18)
-        for idx in macd.idxs_down:
+        for idx in self.idxs_down:
             ax.axvline(idx, c='r')
             ax.text(x=idx - 5, y=min(self.series), s='Downturn', fontsize=18)
 
@@ -116,8 +118,8 @@ class MACD:
         ax.set_yticklabels([int(x) for x in ax.get_yticks()], fontsize=18);
 
         ax = axs[1]
-        ax.plot(macd.df_macd['idx'], macd.df_macd['macd_signal_divergence'])
-        ax.plot(macd.df_macd['idx'], macd.df_macd['macd_signal_divergence_gradient_4'])
+        ax.plot(self.df_macd['idx'], self.df_macd['macd_signal_divergence'])
+        ax.plot(self.df_macd['idx'], self.df_macd['macd_signal_divergence_gradient_4'])
         ax.axhline(0, c='r')            
             
 

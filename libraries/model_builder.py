@@ -7,7 +7,7 @@ import json
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import Ridge, Lasso, ElasticNet, LinearRegression, LogisticRegression, RidgeClassifier
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.calibration import CalibratedClassifierCV, CalibrationDisplay
@@ -795,7 +795,7 @@ class ModelBuilder:
 
 class OptimalModel:
 
-    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, evaluation_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, stratify_kfold=False, cross_val_agg='mean', export_to=None):
+    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, evaluation_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, tscv_gap=0, stratify_kfold=False, cross_val_agg='mean', export_to=None):
         
         self.df_train = None
         self.df_test = None
@@ -825,6 +825,7 @@ class OptimalModel:
         self.outcome_type=outcome_type
         self.eval_metric = eval_metric
         self.k = k
+        self.tscv_gap = tscv_gap
         self.stratify_kfold = stratify_kfold
         self.cross_val_agg = cross_val_agg
         self.export_to = export_to
@@ -1104,7 +1105,7 @@ class OptimalModel:
         
         return self.model, params, self.trials, self.importance, self.metrics, self.cv_scores
     
-    def train_and_evaluate(self, model, X_train, y_train, X_test, y_test, how_to_tune, outcome_type, eval_metric='rmse', k=5, stratify_kfold=False, cross_val_agg='mean'):
+    def train_and_evaluate(self, model, X_train, y_train, X_test, y_test, how_to_tune, outcome_type, eval_metric='rmse', k=5, tscv_gap=0, stratify_kfold=False, cross_val_agg='mean'):
         
         simplefilter(action="ignore", category=ConvergenceWarning)
         
@@ -1209,6 +1210,11 @@ class OptimalModel:
             scores = cross_val_score(model, X_train, y_train, cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
             loss = cross_val_loss_func(scores)
             
+        if how_to_tune == 'cross_val_ts': 
+            cv = TimeSeriesSplit(n_splits=k, gap=tscv_gap)
+            scores = cross_val_score(model, X_train, y_train, cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
+            loss = cross_val_loss_func(scores)
+            
 #         elif how_to_tune == 'cross_val_calibrated':
 #             self.debug_out('hp tuning with cross validation and score calibration on trainset', self.debug)
 #             if outcome_type == 'classification':
@@ -1299,7 +1305,7 @@ class OptimalModel:
             self.debug_out('calculate loss', self.debug)
             loss = eval_func(y_test, y_pred_test)
             
-        return loss, scores  
+        return loss, list(scores)
     
     def handle_parameters(self, params):
         
@@ -1371,6 +1377,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
 
@@ -1420,6 +1427,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   self.eval_metric,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
 
@@ -1449,6 +1457,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
             
@@ -1478,6 +1487,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
             
@@ -1507,6 +1517,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
             
@@ -1536,6 +1547,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
             
@@ -1565,6 +1577,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
             
@@ -1593,6 +1606,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
             
@@ -1626,6 +1640,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   self.eval_metric,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
             
@@ -1656,6 +1671,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
         
@@ -1700,6 +1716,7 @@ class OptimalModel:
                                                   self.outcome_type,
                                                   evaluation,
                                                   self.k,
+                                                  self.tscv_gap,
                                                   self.stratify_kfold,
                                                   self.cross_val_agg)
             
