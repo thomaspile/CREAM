@@ -52,7 +52,7 @@ def long_short_strategy(df_model, df_prices, buy_threshold, sell_threshold,
     if 'price' in df_model.columns:
         df_model = df_model.drop(columns='price')
         
-    df = pd.merge_asof(df_prices[['date', 'open','high','low','close']],
+    df = pd.merge_asof(df_prices[['date', 'high','low','close']],
                       df_model[['date', 'model_prob']].rename(columns={'date':'model_date'}), 
                       left_on='date', 
                       right_on='model_date', 
@@ -778,6 +778,8 @@ class StrategyOptimiser:
  
             portfolio_values = []
             drawdowns = []
+            scores = []
+            
             for df_fold in self.folds:
                 df, df_contracts, portfolio_value, drawdown = long_short_strategy(df_fold, 
                                                                      self.df_prices,
@@ -792,19 +794,14 @@ class StrategyOptimiser:
                                                                      start_balance=params['start_balance'])
                 portfolio_values.append(portfolio_value)
                 drawdowns.append(drawdown)
+                
+                scores.append(portfolio_value * (1 + drawdown))
             
             if self.avg_scores_method == 'hmean':
                 scores = [0 if x < 0 else x for x in portfolio_values]
-                objective_value = stats.hmean(scores)
-                
-                drawdowns_abs = [-x for x in drawdowns]
-                objective_drawdown = - stats.hmean(drawdowns_abs)
+                objective = stats.hmean(scores)
             else:
-                reversed_drawdowns = [1 - d for d in drawdowns]
-                scores = [value * rev_drawdown for value, rev_drawdown in zip(portfolio_values, reversed_drawdowns)]
-                objective = np.mean(portfolio_values)
-                drawdowns_abs = [-x for x in drawdowns]
-                objective_drawdown = np.mean(drawdowns_abs)
+                objective = np.mean(scores)
                 
             cv_scores = [portfolio_values] + [drawdowns]
 
@@ -837,8 +834,8 @@ class StrategyOptimiser:
         cv_scores = pd.DataFrame(sorted(bayes_trials.results, key = lambda x: x['loss'])).cv_scores[0]
         trials = bayes_trials     
 
-        print('Best params:', strategy)
         print('Cross Validation Scores:', cv_scores)
+        print('params = ', strategy)
 
         return strategy
     
@@ -846,7 +843,7 @@ class StrategyOptimiser:
 
         df = df.copy()
 
-        df_applied_strategy, df_contracts, portfolio_value = long_short_strategy(df, 
+        df_applied_strategy, df_contracts, portfolio_value, drawdown = long_short_strategy(df, 
                                                                 self.df_prices,
                                                                 buy_threshold=params['buy_threshold'],
                                                                 sell_threshold=params['sell_threshold'], 
@@ -877,7 +874,7 @@ class StrategyOptimiser:
             ax1.plot(df_applied_strategy['date'], df_applied_strategy[['portfolio_value']], c='b', label='Portfolio Value')
             ax1.set_xlabel('Date')
             ax1.set_ylabel('Portfolio Value', color='b')
-            ax1.legend(loc="upper left")
+            ax1.legend(loc="upper right")
             
             df = self.df_prices[self.df_prices.date.isin(df_applied_strategy.date.values)]
             ax2.plot(df['date'], df['close'], c='r', label='Futures Price')

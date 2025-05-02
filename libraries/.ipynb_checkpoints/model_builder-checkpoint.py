@@ -43,6 +43,8 @@ simplefilter(action="ignore", category=ConvergenceWarning)
 sys.path.insert(0, '/Users/thomaspile/Documents/GitHub/utilities')
 from utilities import GenUtilities, GenPlots, PlotUtilities, StandardDictionaries
 
+from cross_validator import CrossValidator
+
 warnings.filterwarnings("ignore", message="Found `num_iterations` in params. Will use it instead of argument")
 
 def wape(actual, pred):
@@ -795,7 +797,7 @@ class ModelBuilder:
 
 class OptimalModel:
 
-    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, evaluation_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, tscv_gap=0, stratify_kfold=False, cross_val_agg='mean', export_to=None):
+    def __init__(self, cols, model_type, evals, opt_lib, outcome_var=None, df_train=None, df_test=None, df_valid=None, search_space=None, evaluation_space=None, how_to_tune='test', n_jobs=-1, seed=123, hp_algo=tpe.suggest, debug=False, cat_vars=None, plot=False, print_params=False, outcome_type='classification', eval_metric='rmse', k=5, tscv_gap=0, stratify_kfold=False, cross_val_agg='mean', export_to=None, verbose=1):
         
         self.df_train = None
         self.df_test = None
@@ -845,7 +847,7 @@ class OptimalModel:
                     raise ValueError('outcome_var must be supplied in either the search space or as a class parameter')
                 print('Performing model optimisation')
     
-    def export(self, location, label_with='cv_scores'):
+    def export(self, location, label_with='cv_scores', custom_route=False, end=None):
         
         if label_with == 'cv_scores':
             label = '/cv_' + str(np.mean(self.cv_scores))
@@ -853,7 +855,13 @@ class OptimalModel:
         files = [self.model, self.X_train, self.y_train, self.X_test, self.y_test, self.model_params, self.metrics, self.importance]
         labels = ['model', 'X_train', 'y_train', 'X_test', 'y_test', 'params', 'metrics', 'importance']
         
-        folder = location.rstrip('/') + '/' + self.y_train.name + '/' + self.model_type + str(label)
+        if custom_route:
+            folder = location
+        else:
+            folder = location.rstrip('/') + '/' + self.y_train.name + '/' + self.model_type + str(label)            
+        
+        if end is not None:
+            folder = folder.rstrip('/') + '/' + end
         
         if not os.path.isdir(folder):
             os.makedirs(folder)
@@ -1105,12 +1113,14 @@ class OptimalModel:
         
         return self.model, params, self.trials, self.importance, self.metrics, self.cv_scores
     
-    def train_and_evaluate(self, model, X_train, y_train, X_test, y_test, how_to_tune, outcome_type, eval_metric='rmse', k=5, tscv_gap=0, stratify_kfold=False, cross_val_agg='mean'):
+    def train_and_evaluate(self, model, df_train, df_test, features, outcome_var, how_to_tune, outcome_type, eval_metric='rmse', k=5, tscv_gap=0, stratify_kfold=False, cross_val_agg='mean'):
         
         simplefilter(action="ignore", category=ConvergenceWarning)
         
         if cross_val_agg == 'hmean':
-            cross_val_mean_func = stats.hmean
+            def cross_val_mean_func(scores):
+                s = [-1 * score if score < 0 else score for score in scores] 
+                return stats.hmean(s)
         else:
             cross_val_mean_func = np.mean
         
@@ -1207,13 +1217,19 @@ class OptimalModel:
                     cv = KFold(n_splits=k, shuffle=False)
             else:
                 cv = KFold(n_splits=k, shuffle=False) 
-            scores = cross_val_score(model, X_train, y_train, cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
+            scores = cross_val_score(model, df_train[features], df_train[outcome_var], 
+                                     cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
             loss = cross_val_loss_func(scores)
             
         if how_to_tune == 'cross_val_ts': 
             cv = TimeSeriesSplit(n_splits=k, gap=tscv_gap)
-            scores = cross_val_score(model, X_train, y_train, cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
+            
+            cross_val = CrossValidator(model, df_train, outcome_var, cv, features)
+            scores = cross_val.score(cv_scoring)
             loss = cross_val_loss_func(scores)
+
+            # scores = cross_val_score(model, X_train, y_train, cv=cv, n_jobs=self.n_jobs, scoring=cv_scoring)
+            # loss = cross_val_loss_func(scores)
             
 #         elif how_to_tune == 'cross_val_calibrated':
 #             self.debug_out('hp tuning with cross validation and score calibration on trainset', self.debug)
@@ -1328,11 +1344,11 @@ class OptimalModel:
         else:
             outcome_var = self.outcome_var
             
-        X_train = self.df_train[self.cols]
-        y_train = self.df_train[outcome_var]
-        if self.df_test is not None:
-            X_test = self.df_test[self.cols]
-            y_test = self.df_test[outcome_var]
+        # X_train = self.df_train[self.cols]
+        # y_train = self.df_train[outcome_var]
+        # if self.df_test is not None:
+        #     X_test = self.df_test[self.cols]
+        #     y_test = self.df_test[outcome_var]
         
         model_params = copy.deepcopy(params)
         if 'outcome_var' in model_params.keys():
@@ -1340,7 +1356,7 @@ class OptimalModel:
         if 'cutoff' in model_params.keys():
             del model_params['cutoff']
             
-        return X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params
+        return outcome_var, evaluation, model_params, evaluation_params
             
     def objective_lgb_hp(self, params):
 
@@ -1363,16 +1379,16 @@ class OptimalModel:
         else:
             model = LGBMRegressor(n_jobs=self.n_jobs, verbosity=-100)
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
+        outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
         self.debug_out('hp lgb train and evaluate', self.debug)
         loss, cv_scores = self.train_and_evaluate(model, 
-                                                  X_train, 
-                                                  y_train, 
-                                                  X_test, 
-                                                  y_test, 
+                                                  self.df_train, 
+                                                  self.df_test, 
+                                                  self.cols,
+                                                  outcome_var,
                                                   self.how_to_tune, 
                                                   self.outcome_type,
                                                   evaluation,
@@ -1419,13 +1435,13 @@ class OptimalModel:
 
         self.debug_out('hp lgb train and evaluate', self.debug)
         loss, cv_scores = self.train_and_evaluate(model, 
-                                                  self.X_train[self.cols], 
-                                                  self.y_train, 
-                                                  self.X_test[self.cols], 
-                                                  self.y_test, 
+                                                  self.df_train, 
+                                                  self.df_test, 
+                                                  self.cols,
+                                                  outcome_var,
                                                   self.how_to_tune, 
                                                   self.outcome_type,
-                                                  self.eval_metric,
+                                                  evaluation,
                                                   self.k,
                                                   self.tscv_gap,
                                                   self.stratify_kfold,
@@ -1657,16 +1673,16 @@ class OptimalModel:
         else:
             model = RandomForestClassifier(n_jobs=self.n_jobs)
         
-        X_train, y_train, X_test, y_test, outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
+        outcome_var, evaluation, model_params, evaluation_params = self.handle_parameters(params)
             
         model.set_params(**model_params)
 
         self.debug_out('hp rf train and evaluate', self.debug)
         loss, cv_scores = self.train_and_evaluate(model, 
-                                                  X_train, 
-                                                  y_train, 
-                                                  X_test, 
-                                                  y_test, 
+                                                  self.df_train, 
+                                                  self.df_test, 
+                                                  self.cols,
+                                                  outcome_var,
                                                   self.how_to_tune, 
                                                   self.outcome_type,
                                                   evaluation,
